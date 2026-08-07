@@ -126,4 +126,79 @@ class ChangeEngineTest {
         final Change change = new Change("strikethrough", new Range(0, 1), "x");
         assertThrows(InvalidChangeException.class, () -> ChangeEngine.apply(ChangeEngine.fromText("abc"), List.of(change)));
     }
+
+    @Test
+    void acceptRangeKeepsInsertionsAndRemovesStruckText() {
+        final List<Segment> redlined = apply("the quick brown fox", rangeChange(4, 9, "slow"));
+        // The change spans struck "quick" [4,9) plus inserted "slow" [9,13).
+        assertEquals("[U]the slow brown fox", render(ChangeEngine.acceptRange(redlined, 4, 13)));
+    }
+
+    @Test
+    void rejectRangeRemovesInsertionsAndRestoresStruckText() {
+        final List<Segment> redlined = apply("the quick brown fox", rangeChange(4, 9, "slow"));
+        assertEquals("[U]the quick brown fox", render(ChangeEngine.rejectRange(redlined, 4, 13)));
+    }
+
+    @Test
+    void acceptRangeAffectsOnlyTheTargetedChange() {
+        final List<Segment> redlined = apply("one two three", rangeChange(0, 3, "1"), rangeChange(8, 13, "3"));
+        // Flattened "one1 two three3"; accept just the first change at [0,4).
+        assertEquals("[U]1 two [D]three[I]3", render(ChangeEngine.acceptRange(redlined, 0, 4)));
+    }
+
+    @Test
+    void rejectRangeAffectsOnlyTheTargetedChange() {
+        final List<Segment> redlined = apply("one two three", rangeChange(0, 3, "1"), rangeChange(8, 13, "3"));
+        // Flattened "one1 two three3"; reject just the second change at [9,15).
+        assertEquals("[D]one[I]1[U] two three", render(ChangeEngine.rejectRange(redlined, 9, 15)));
+    }
+
+    @Test
+    void acceptRangeOutOfBoundsIsRejected() {
+        final List<Segment> redlined = apply("abc", rangeChange(0, 1, "X"));
+        assertThrows(RangeOutOfBoundsException.class, () -> ChangeEngine.acceptRange(redlined, 0, 99));
+    }
+
+    @Test
+    void acceptAllFinalizesEveryChange() {
+        final List<Segment> redlined = apply("one two three", rangeChange(0, 3, "1"), rangeChange(8, 13, "3"));
+        assertEquals("[U]1 two 3", render(ChangeEngine.acceptAll(redlined)));
+    }
+
+    @Test
+    void rejectAllRevertsEveryChange() {
+        final List<Segment> redlined = apply("one two three", rangeChange(0, 3, "1"), rangeChange(8, 13, "3"));
+        assertEquals("[U]one two three", render(ChangeEngine.rejectAll(redlined)));
+    }
+
+    @Test
+    void acceptingOnlyTheStruckPartLeavesTheInsertionPending() {
+        final List<Segment> redlined = apply("the quick brown fox", rangeChange(4, 9, "slow"));
+        assertEquals("[U]the [I]slow[U] brown fox", render(ChangeEngine.acceptRange(redlined, 4, 9)));
+    }
+
+    @Test
+    void rejectingOnlyTheInsertedPartLeavesTheDeletionPending() {
+        final List<Segment> redlined = apply("the quick brown fox", rangeChange(4, 9, "slow"));
+        assertEquals("[U]the [D]quick[U] brown fox", render(ChangeEngine.rejectRange(redlined, 9, 13)));
+    }
+
+    @Test
+    void acceptingOverUnchangedTextIsANoop() {
+        final List<Segment> redlined = apply("the quick brown fox", rangeChange(4, 9, "slow"));
+        assertEquals("[U]the [D]quick[I]slow[U] brown fox", render(ChangeEngine.acceptRange(redlined, 0, 4)));
+    }
+
+    @Test
+    void acceptingAPureInsertionMakesItPermanent() {
+        final List<Segment> inserted = apply("ac", rangeChange(1, 1, "b"));
+        assertEquals("[U]abc", render(ChangeEngine.acceptRange(inserted, 1, 2)));
+    }
+
+    @Test
+    void rejectingAPureDeletionRestoresIt() {
+        final List<Segment> deleted = apply("hello world", rangeChange(5, 11, ""));
+        assertEquals("[U]hello world", render(ChangeEngine.rejectRange(deleted, 5, 11)));
+    }
 }

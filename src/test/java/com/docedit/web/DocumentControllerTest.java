@@ -217,4 +217,102 @@ class DocumentControllerTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value(404));
     }
+
+    private String redlineQuickToSlow(final String title) throws Exception {
+        final String id = createDocument("the quick brown fox", title);
+        mockMvc.perform(patch("/documents/" + id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":4,"end":9},"replacement":"slow"}]}"""))
+                .andExpect(status().isOk());
+        return id;
+    }
+
+    @Test
+    void acceptFinalizesTheTargetedChange() throws Exception {
+        final String id = redlineQuickToSlow("Doc");
+        // The change spans struck "quick" plus inserted "slow": flattened [4,13).
+        mockMvc.perform(post("/documents/" + id + "/accept")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"start":4,"end":13}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("the slow brown fox"))
+                .andExpect(jsonPath("$.version").value(3))
+                .andExpect(jsonPath("$.segments.length()").value(1))
+                .andExpect(jsonPath("$.segments[0].type").value("UNCHANGED"));
+    }
+
+    @Test
+    void rejectRevertsTheTargetedChange() throws Exception {
+        final String id = redlineQuickToSlow("Doc");
+        mockMvc.perform(post("/documents/" + id + "/reject")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"start":4,"end":13}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("the quick brown fox"))
+                .andExpect(jsonPath("$.segments[0].type").value("UNCHANGED"));
+    }
+
+    @Test
+    void acceptOnMissingDocumentReturns404() throws Exception {
+        mockMvc.perform(post("/documents/does-not-exist/accept")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"start":0,"end":1}"""))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(404));
+    }
+
+    @Test
+    void acceptAllFinalizesEveryChange() throws Exception {
+        final String id = redlineQuickToSlow("Doc");
+        mockMvc.perform(post("/documents/" + id + "/accept-all"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("the slow brown fox"))
+                .andExpect(jsonPath("$.segments.length()").value(1))
+                .andExpect(jsonPath("$.segments[0].type").value("UNCHANGED"));
+    }
+
+    @Test
+    void rejectAllRevertsEveryChange() throws Exception {
+        final String id = redlineQuickToSlow("Doc");
+        mockMvc.perform(post("/documents/" + id + "/reject-all"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("the quick brown fox"));
+    }
+
+    @Test
+    void rejectOnMissingDocumentReturns404() throws Exception {
+        mockMvc.perform(post("/documents/does-not-exist/reject")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"start":0,"end":1}"""))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(404));
+    }
+
+    @Test
+    void acceptWithOutOfBoundsRangeReturns422() throws Exception {
+        final String id = createDocument("abc", "Doc");
+        mockMvc.perform(post("/documents/" + id + "/accept")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"start":0,"end":99}"""))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value(422));
+    }
+
+    @Test
+    void staleIfMatchIsRejectedOnAcceptWith412() throws Exception {
+        final String id = redlineQuickToSlow("Doc"); // create (v1) + patch (v2)
+        mockMvc.perform(post("/documents/" + id + "/accept")
+                        .header(HttpHeaders.IF_MATCH, "\"1\"")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"start":4,"end":13}"""))
+                .andExpect(status().isPreconditionFailed())
+                .andExpect(jsonPath("$.code").value(412));
+    }
 }

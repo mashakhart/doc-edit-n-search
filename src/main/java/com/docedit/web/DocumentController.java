@@ -3,6 +3,7 @@ package com.docedit.web;
 import com.docedit.engine.ChangeEngine;
 import com.docedit.payload.request.ChangeRequest;
 import com.docedit.payload.request.DocumentCreate;
+import com.docedit.payload.request.Range;
 import com.docedit.payload.response.DocumentResponse;
 import com.docedit.store.Document;
 import com.docedit.store.DocumentStore;
@@ -72,6 +73,40 @@ public class DocumentController {
     public ResponseEntity<Void> delete(@PathVariable final String id) {
         store.delete(id);
         return ResponseEntity.noContent().build();
+    }
+
+    /** Accepts the changes in the given range: insertions become permanent, struck text removed. */
+    @PostMapping("/{id}/accept")
+    public ResponseEntity<DocumentResponse> accept(
+            @PathVariable final String id,
+            @Valid @RequestBody final Range range,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) @Nullable final String ifMatch) {
+        return withEtag(HttpStatus.OK, store.acceptChanges(id, range, parseIfMatch(ifMatch)));
+    }
+
+    /** Rejects the changes in the given range: insertions removed, struck text restored. */
+    @PostMapping("/{id}/reject")
+    public ResponseEntity<DocumentResponse> reject(
+            @PathVariable final String id,
+            @Valid @RequestBody final Range range,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) @Nullable final String ifMatch) {
+        return withEtag(HttpStatus.OK, store.rejectChanges(id, range, parseIfMatch(ifMatch)));
+    }
+
+    /** Accepts every change in the document. */
+    @PostMapping("/{id}/accept-all")
+    public ResponseEntity<DocumentResponse> acceptAll(
+            @PathVariable final String id,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) @Nullable final String ifMatch) {
+        return withEtag(HttpStatus.OK, store.acceptAllChanges(id, parseIfMatch(ifMatch)));
+    }
+
+    /** Rejects every change in the document. */
+    @PostMapping("/{id}/reject-all")
+    public ResponseEntity<DocumentResponse> rejectAll(
+            @PathVariable final String id,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) @Nullable final String ifMatch) {
+        return withEtag(HttpStatus.OK, store.rejectAllChanges(id, parseIfMatch(ifMatch)));
     }
 
     /** Parses an If-Match header (e.g. "3" or W/"3") into a version, or null if unusable. */

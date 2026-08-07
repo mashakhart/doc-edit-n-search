@@ -8,6 +8,7 @@ import com.docedit.payload.request.Range;
 import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 /**
  * Pure, stateless redline engine. Applies a batch of range-based edits to a
@@ -78,9 +79,82 @@ public final class ChangeEngine {
     /** The document text if all changes were accepted: everything except deletions. */
     @Nonnull
     public static String acceptedText(@Nonnull final List<Segment> segments) {
+        return concatExcluding(segments, SegmentType.DELETED);
+    }
+
+    /**
+     * Accepts the changes within the given range: insertions become permanent
+     * (UNCHANGED) and struck text is removed. Text outside the range is untouched.
+     */
+    @Nonnull
+    public static List<Segment> acceptRange(@Nonnull final List<Segment> segments,
+                                            final int start, final int end) {
+        return rangeOp(segments, start, end, SegmentType.UNCHANGED, null);
+    }
+
+    /**
+     * Rejects the changes within the given range: insertions are removed and
+     * struck text is restored (UNCHANGED). Text outside the range is untouched.
+     */
+    @Nonnull
+    public static List<Segment> rejectRange(@Nonnull final List<Segment> segments,
+                                            final int start, final int end) {
+        return rangeOp(segments, start, end, null, SegmentType.UNCHANGED);
+    }
+
+    /** Accepts every change in the document (accept over the whole span). */
+    @Nonnull
+    public static List<Segment> acceptAll(@Nonnull final List<Segment> segments) {
+        return acceptRange(segments, 0, totalLength(segments));
+    }
+
+    /** Rejects every change in the document (reject over the whole span). */
+    @Nonnull
+    public static List<Segment> rejectAll(@Nonnull final List<Segment> segments) {
+        return rejectRange(segments, 0, totalLength(segments));
+    }
+
+    private static int totalLength(@Nonnull final List<Segment> segments) {
+        int length = 0;
+        for (final Segment segment : segments) {
+            length += segment.text().length();
+        }
+        return length;
+    }
+
+    /**
+     * Retypes insertions/deletions within a range and drops any whose target type
+     * is null; UNCHANGED text and everything outside the range is left as-is.
+     */
+    @Nonnull
+    private static List<Segment> rangeOp(@Nonnull final List<Segment> segments, final int start, final int end,
+                                         @Nullable final SegmentType insertedResult,
+                                         @Nullable final SegmentType deletedResult) {
+        final List<Cell> cells = flatten(segments);
+        if (start < 0 || end < start || end > cells.size()) {
+            throw new RangeOutOfBoundsException(start, end, cells.size());
+        }
+        final List<Cell> out = new ArrayList<>(cells.size());
+        for (int i = 0; i < cells.size(); i++) {
+            final Cell cell = cells.get(i);
+            if (i < start || i >= end || cell.type() == SegmentType.UNCHANGED) {
+                out.add(cell);
+                continue;
+            }
+            final SegmentType result = cell.type() == SegmentType.INSERTED ? insertedResult : deletedResult;
+            if (result != null) {
+                out.add(new Cell(cell.character(), result));
+            }
+        }
+        return coalesce(out);
+    }
+
+    @Nonnull
+    private static String concatExcluding(@Nonnull final List<Segment> segments,
+                                          @Nonnull final SegmentType excluded) {
         final StringBuilder builder = new StringBuilder();
         for (final Segment segment : segments) {
-            if (segment.type() != SegmentType.DELETED) {
+            if (segment.type() != excluded) {
                 builder.append(segment.text());
             }
         }
