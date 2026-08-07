@@ -164,6 +164,87 @@ class DocumentControllerTest extends AbstractApiTest {
     }
 
     @Test
+    void editsApplyAsAnOrderedStreamAndBumpVersionOnce() throws Exception {
+        final String id = createDocument("cat", "Doc");
+        // Two keystrokes: append "s" (now "cats"), then append "!" at index 4 — the
+        // second edit is only in range because the first already ran. One version bump.
+        mockMvc.perform(post("/documents/" + id + "/edits")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[
+                                  {"range":{"start":3,"end":3},"replacement":"s"},
+                                  {"range":{"start":4,"end":4},"replacement":"!"}
+                                ]}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("cats!"))
+                .andExpect(jsonPath("$.version").value(2))
+                .andExpect(header().string(HttpHeaders.ETAG, "\"2\""));
+    }
+
+    @Test
+    void editsAllowALaterEditThatAtomicBatchWouldReject() throws Exception {
+        // Against the 3-char original, range [4,4) is out of bounds — the atomic
+        // PATCH would 422. As a sequential stream the first edit grows the text first.
+        final String id = createDocument("abc", "Doc");
+        mockMvc.perform(post("/documents/" + id + "/edits")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[
+                                  {"range":{"start":3,"end":3},"replacement":"d"},
+                                  {"range":{"start":4,"end":4},"replacement":"e"}
+                                ]}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("abcde"));
+    }
+
+    @Test
+    void editsCanLayerAnEditOnAPriorRedline() throws Exception {
+        final String id = createDocument("the quick brown fox", "Doc");
+        // Redline quick->slow, then (on the flattened "the quickslow brown fox")
+        // strike " brown" at [13,19); accepted result drops both struck spans.
+        mockMvc.perform(post("/documents/" + id + "/edits")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[
+                                  {"range":{"start":4,"end":9},"replacement":"slow"},
+                                  {"range":{"start":13,"end":19},"replacement":""}
+                                ]}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("the slow fox"))
+                .andExpect(jsonPath("$.version").value(2));
+    }
+
+    @Test
+    void editsRejectStaleIfMatchWith412() throws Exception {
+        final String id = createDocument("hello", "Doc"); // v1
+        mockMvc.perform(post("/documents/" + id + "/edits")
+                        .header(HttpHeaders.IF_MATCH, "\"1\"")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":5,"end":5},"replacement":"!"}]}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value(2));
+
+        mockMvc.perform(post("/documents/" + id + "/edits")
+                        .header(HttpHeaders.IF_MATCH, "\"1\"")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":0,"end":1},"replacement":"J"}]}"""))
+                .andExpect(status().isPreconditionFailed())
+                .andExpect(jsonPath("$.code").value(412));
+    }
+
+    @Test
+    void editsOnMissingDocumentReturns404() throws Exception {
+        mockMvc.perform(post("/documents/does-not-exist/edits")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":0,"end":0},"replacement":"x"}]}"""))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(404));
+    }
+
+    @Test
     void deleteRemovesDocument() throws Exception {
         final String id = createDocument("disposable", "Doc");
         mockMvc.perform(delete("/documents/" + id)).andExpect(status().isNoContent());

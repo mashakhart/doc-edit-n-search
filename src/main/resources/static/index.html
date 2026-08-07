@@ -58,7 +58,7 @@
   .editor-grid { display: grid; grid-template-columns: 1fr 300px; gap: 20px; align-items: start; }
   #editor { min-height: 340px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius);
             background: var(--card); white-space: pre-wrap; outline: none; font-size: 16px; box-shadow: var(--shadow); }
-  #editor:empty::before { content: "Type to redline. New text appears red; removed text is struck through."; color: #b3b8c2; }
+  #editor:empty::before { content: "Type to redline. New text appears blue; removed text is struck through."; color: #b3b8c2; }
   .inserted { color: var(--blue); }
   .deleted  { color: var(--red); text-decoration: line-through; }
   .preview { color: var(--muted); font-size: 13px; margin-top: 10px; }
@@ -140,8 +140,12 @@
 <script>
 "use strict";
 
-const state = { docId: null, version: 0, segments: [], docs: [] };
+// pending: keystroke changes applied locally but not yet saved to the server.
+const state = { docId: null, version: 0, segments: [], docs: [], pending: [] };
 let saveChain = Promise.resolve();
+let flushTimer = null;
+const FLUSH_DELAY_MS = 400;   // debounce: coalesce a burst of typing into one save
+const FLUSH_MAX_PENDING = 250; // ...but don't let the batch grow unbounded
 
 // ---- API -----------------------------------------------------------------
 async function api(method, path, body, ifMatch) {
@@ -157,7 +161,7 @@ async function api(method, path, body, ifMatch) {
 const listDocs    = () => api("GET", "/documents");
 const createDoc   = (text, title) => api("POST", "/documents", { text, title });
 const getDoc      = (id) => api("GET", "/documents/" + id);
-const patchDoc    = (id, changes, v) => api("PATCH", "/documents/" + id, { changes }, v);
+const editStream  = (id, changes, v) => api("POST", "/documents/" + id + "/edits", { changes }, v);
 const acceptRange = (id, start, end, v) => api("POST", "/documents/" + id + "/accept", { start, end }, v);
 const rejectRange = (id, start, end, v) => api("POST", "/documents/" + id + "/reject", { start, end }, v);
 const acceptAll   = (id, v) => api("POST", "/documents/" + id + "/accept-all", undefined, v);
@@ -230,9 +234,10 @@ function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 // ---- open / create -------------------------------------------------------
 function applyDoc(doc) {
+  // Authoritative reset: adopt the server's document and drop any local pending edits.
+  clearTimeout(flushTimer); flushTimer = null; state.pending = [];
   state.docId = doc.id; state.version = doc.version; state.segments = doc.segments || [];
   $("editor-title").textContent = doc.title || "(untitled)";
-  $("editor-version").textContent = "v" + doc.version;
   renderEditor();
 }
 async function openDoc(id) {
@@ -255,7 +260,7 @@ function renderEditor() {
     const cls = s.type === "INSERTED" ? "inserted" : s.type === "DELETED" ? "deleted" : "";
     return `<span class="${cls}">${escapeHtml(s.text)}</span>`;
   }).join("");
-  $("editor-version").textContent = "v" + state.version;
+  $("editor-version").textContent = "v" + state.version + (state.pending.length ? " • saving…" : "");
   $("accepted-preview").textContent = "If accepted: " + acceptedTextLocal();
   renderChanges();
 }
@@ -319,7 +324,91 @@ function setCaret(offset) {
   editor.focus();
 }
 
-// ---- live editing: every keystroke -> a range PATCH ----------------------
+// ---- optimistic editing --------------------------------------------------
+// A client-side mirror of ONE range-replace from the server's ChangeEngine, so a
+// keystroke renders instantly (correctly coloured) without waiting for the server.
+// It must match the Java engine's single-change behaviour; the server stays
+// authoritative and re-syncs us on each flush. Out-of-range is clamped (the caret
+// can't produce it) rather than thrown — the server does the real validation.
+function applyChangeLocal(segments, start, end, replacement) {
+  const offs = [0];
+  for (const s of segments) offs.push(offs[offs.length - 1] + s.text.length);
+  const total = offs[offs.length - 1];
+  start = Math.max(0, Math.min(start, total));
+  end = Math.max(start, Math.min(end, total));
+  const emit = (from, to, retype) => {
+    const out = [];
+    if (from >= to) return out;
+    let pos = from, i = 0;
+    while (i < segments.length && offs[i + 1] <= from) i++;
+    while (pos < to && i < segments.length) {
+      const segStart = offs[i], segEnd = offs[i + 1];
+      const pieceStart = Math.max(pos, segStart), pieceEnd = Math.min(to, segEnd);
+      if (pieceEnd > pieceStart) {
+        const newType = retype(segments[i].type);
+        if (newType !== null) out.push({ text: segments[i].text.slice(pieceStart - segStart, pieceEnd - segStart), type: newType });
+      }
+      pos = pieceEnd; i++;
+    }
+    return out;
+  };
+  const ident = t => t;
+  const strike = t => t === "INSERTED" ? null : "DELETED";  // deleting your own insertion drops it
+  let res = emit(0, start, ident).concat(emit(start, end, strike));
+  if (replacement) res.push({ text: replacement, type: "INSERTED" });
+  res = res.concat(emit(end, total, ident));
+  const out = [];  // coalesce adjacent same-type runs
+  for (const s of res) {
+    if (out.length && out[out.length - 1].type === s.type) out[out.length - 1] = { text: out[out.length - 1].text + s.text, type: s.type };
+    else out.push(s);
+  }
+  return out;
+}
+
+// Apply a change locally and render it now; queue it for a debounced save.
+function optimisticEdit(change, caret) {
+  state.segments = applyChangeLocal(state.segments, change.range.start, change.range.end, change.replacement);
+  state.pending.push(change);
+  renderEditor();
+  setCaret(caret);
+  clearTimeout(flushTimer);
+  flushTimer = setTimeout(flush, FLUSH_DELAY_MS);
+  if (state.pending.length >= FLUSH_MAX_PENDING) flush();
+}
+
+// Send the queued keystrokes to the server as one ordered stream. Serialised on
+// saveChain so flushes never overlap. On success we adopt the server version and,
+// if the user has paused (nothing new queued), re-sync from its segments as a
+// self-heal. On conflict/error we reload the authoritative document.
+function flush() {
+  clearTimeout(flushTimer); flushTimer = null;
+  if (!state.docId || state.pending.length === 0) return saveChain;
+  saveChain = saveChain.then(async () => {
+    if (state.pending.length === 0) return;
+    const docId = state.docId, baseVersion = state.version, sending = state.pending;
+    state.pending = [];
+    try {
+      const doc = await editStream(docId, sending, baseVersion);
+      if (state.docId !== docId) return;              // user navigated away mid-flight
+      state.version = doc.version;
+      if (state.pending.length === 0) {               // paused: safe to re-render from server
+        const focused = document.activeElement === editor;
+        const caret = focused ? caretOffsets().start : 0;
+        state.segments = doc.segments || [];
+        renderEditor();
+        if (focused) setCaret(caret);
+      } else {
+        renderEditor();                                // still typing: just refresh the version label
+      }
+    } catch (err) {
+      alert(err.message);
+      if (state.docId === docId) { try { applyDoc(await getDoc(docId)); } catch (_) { /* ignore */ } }
+    }
+  });
+  return saveChain;
+}
+
+// ---- live editing: every keystroke -> an optimistic local edit -----------
 editor.addEventListener("beforeinput", (e) => {
   if (!state.docId) return;
   // IME composition is handled natively and reconciled on compositionend; don't
@@ -354,15 +443,11 @@ editor.addEventListener("beforeinput", (e) => {
   }
   e.preventDefault();
   if (!range) return;
-  const change = { range: { start: range[0], end: range[1] }, replacement };
-  saveChain = saveChain.then(async () => {
-    try { applyDoc(await patchDoc(state.docId, [change], state.version)); setCaret(caret); }
-    catch (err) { alert(err.message); if (state.docId) applyDoc(await getDoc(state.docId)); }
-  });
+  optimisticEdit({ range: { start: range[0], end: range[1] }, replacement }, caret);
 });
 
 // IME: let the browser compose natively, then apply the finished text as one
-// insert at the position composition began, and re-render from the server.
+// optimistic insert at the position composition began.
 let compositionStart = null;
 editor.addEventListener("compositionstart", () => { compositionStart = caretOffsets().start; });
 editor.addEventListener("compositionend", (e) => {
@@ -370,14 +455,13 @@ editor.addEventListener("compositionend", (e) => {
   const data = e.data || "";
   compositionStart = null;
   if (!data || !state.docId) return;
-  const change = { range: { start: at, end: at }, replacement: data };
-  saveChain = saveChain.then(async () => {
-    try { applyDoc(await patchDoc(state.docId, [change], state.version)); setCaret(at + data.length); }
-    catch (err) { alert(err.message); if (state.docId) applyDoc(await getDoc(state.docId)); }
-  });
+  optimisticEdit({ range: { start: at, end: at }, replacement: data }, at + data.length);
 });
 
-function runOp(fn) {
+async function runOp(fn) {
+  // Push pending keystrokes first: accept/reject ranges are in the current
+  // (optimistic) coordinate space, so the server must have those edits already.
+  await flush();
   saveChain = saveChain.then(async () => {
     try { applyDoc(await fn()); }
     catch (e) { alert(e.message); if (state.docId) applyDoc(await getDoc(state.docId)); }
@@ -386,6 +470,10 @@ function runOp(fn) {
 }
 $("accept-all").onclick = () => state.docId && runOp(() => acceptAll(state.docId, state.version));
 $("reject-all").onclick = () => state.docId && runOp(() => rejectAll(state.docId, state.version));
+
+// Save any pending keystrokes when focus leaves the editor (e.g. clicking a
+// button, switching views) so nothing typed is lost.
+editor.addEventListener("blur", () => flush());
 
 // ---- boot ----------------------------------------------------------------
 showView("library");

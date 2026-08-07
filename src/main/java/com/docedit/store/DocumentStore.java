@@ -83,6 +83,26 @@ public class DocumentStore {
         return mutate(id, expectedVersion, segments -> ChangeEngine.apply(segments, changes));
     }
 
+    /**
+     * Applies an ordered stream of edits sequentially — each against the result of
+     * the previous — as one versioned write. This is the interactive editor's path:
+     * the client renders keystrokes optimistically and then replays, in order, the
+     * ones it made since its last sync. Applying them one at a time (rather than as
+     * an atomic batch resolved against a single base, like edit) lets later edits
+     * build on earlier ones, which is exactly what a stream of keystrokes does.
+     */
+    @Nonnull
+    public Document editStream(@Nonnull final String id, @Nonnull final List<Change> changes,
+                               @Nullable final Long expectedVersion) {
+        return mutate(id, expectedVersion, segments -> {
+            List<Segment> current = segments;
+            for (final Change change : changes) {
+                current = ChangeEngine.apply(current, List.of(change));
+            }
+            return current;
+        });
+    }
+
     /** Accepts the changes within the given range: insertions kept, struck text removed. */
     @Nonnull
     public Document acceptChanges(@Nonnull final String id, @Nonnull final Range range,

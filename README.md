@@ -19,7 +19,8 @@ Requirements: **JDK 21**.
 ```
 
 Open <http://localhost:8080> for the UI (a redline editor with an accept/reject
-panel and a Library search box). The API is under `/documents`.
+panel and a Library search box). All HTTP endpoints live under `/documents` — see
+the [API](#api) section below.
 
 ---
 
@@ -102,9 +103,24 @@ curl -X PATCH localhost:8080/documents/{id} \
   -H 'Content-Type: application/json' -H 'If-Match: "1"' \
   -d '{"changes":[{"range":{"start":4,"end":9},"replacement":"slow"}]}'
 
+# Interactive editor: replay a stream of keystroke edits applied IN ORDER, each
+# building on the previous (this is what the browser editor posts). Here: append
+# "s" (making "cats"), then "!" at index 4 — valid only because the first ran.
+curl -X POST localhost:8080/documents/{id}/edits \
+  -H 'Content-Type: application/json' \
+  -d '{"changes":[
+        {"range":{"start":3,"end":3},"replacement":"s"},
+        {"range":{"start":4,"end":4},"replacement":"!"}
+      ]}'
+
 # Delete
 curl -X DELETE localhost:8080/documents/{id}
 ```
+
+`PATCH` and `POST /{id}/edits` differ deliberately: `PATCH` applies a batch of
+**independent** edits atomically, all resolved against the current text (the bulk
+API); `/edits` applies an **ordered stream** sequentially, so later edits build on
+earlier ones — exactly how a run of keystrokes behaves.
 
 The response carries the new version in an `ETag` header (e.g. `ETag: "2"`),
 which you pass back as `If-Match` on the next write.
@@ -163,8 +179,10 @@ HTTP  ─►  web/            DocumentController, SearchController, ApiException
 A `PATCH` flows: `DocumentController` validates the body → `DocumentStore.edit`
 takes a per-document atomic lock, checks the version, and calls
 `ChangeEngine.apply` → the engine produces new segments → the store bumps the
-version and re-indexes the text for search → the controller returns the document
-with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
+version and schedules a search re-index off the request thread → the controller
+returns the document with a fresh `ETag`. The interactive editor instead posts to
+`POST /documents/{id}/edits`, which applies an ordered stream of edits
+sequentially. Any thrown exception is mapped to `{error, code}` by
 `ApiExceptionHandler`, keeping the store and engine free of HTTP concerns.
 
 ---
@@ -181,6 +199,19 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 - **Accept/reject by range.** A change is identified by its flattened span, which
   the frontend already knows from the rendered segments — no per-change IDs
   needed for a first version.
+- **Two write paths.** `PATCH /documents/{id}` applies a batch of *independent*
+  edits atomically, resolved against the current text (the bulk API). The
+  interactive editor posts to `/documents/{id}/edits`, an *ordered stream* applied
+  sequentially so later keystrokes build on earlier ones.
+- **Optimistic, client-authoritative editing.** The browser applies each keystroke
+  locally and renders it instantly — a small mirror of the engine's single
+  range-replace — then debounce-batches the edits to `/edits` and re-syncs from the
+  response. Typing never waits on a round-trip; the server stays authoritative and
+  corrects any divergence on the next flush.
+- **Indexing off the write path.** Re-indexing runs on a single-thread executor, so
+  the `O(n)` tokenizing never blocks a write. The task is submitted under the
+  per-document lock, so re-indexes stay ordered with versions; search is thus
+  *eventually* consistent (it may lag a write by a beat).
 - **Optimistic concurrency.** A monotonic `version` backs `ETag`/`If-Match`;
   conflicting concurrent writes are detected and rejected (412) rather than
   silently clobbering. True concurrent *merging* (Operational Transform / CRDTs)
@@ -200,7 +231,8 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 ## Performance considerations
 
 - **Search scales.** Indexing a document is a single linear tokenizing pass on
-  write. Because matching is partial (substring), a query scans the token
+  write, run off the request thread so it never blocks the edit. Because matching
+  is partial (substring), a query scans the token
   *vocabulary* (far smaller than the corpus text) and unions posting sets, rather
   than scanning every document; exact-token matching would instead be a direct
   hash lookup. The `PerformanceTest` searches a **10 MB** document well within its
@@ -215,9 +247,33 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
   benchmark edits a **1 MB** doc comfortably). Producing the new immutable segment
   list still copies the text once (`O(n)` characters); a rope with structural
   sharing would avoid even that copy for very large, frequently-edited documents.
+- **Interactive editing feels instant.** Each keystroke is applied and rendered
+  locally, so typing never waits on the network; edits are debounce-batched to the
+  server (one request per pause, not one per keystroke) and indexing runs off the
+  write path. See client-authoritative editing under *Design decisions*.
 - **Trade-off, stated plainly.** The index costs roughly the corpus size again in
   memory and a re-index on each write, to make reads fast. That's the right trade
   when reads dominate writes — as they do for a search service.
+
+### Scaling to very large documents (10 MB+)
+
+Contracts are typically kilobytes to a few megabytes, so the current design keeps
+those fast and simple. Three further optimizations matter only once documents reach
+tens of megabytes, and are left as documented design rather than built:
+
+- **Piece-table / rope engine (structural sharing).** Applying an edit today
+  rebuilds the segment list and copies the untouched text once (`O(n)`). A rope or
+  piece table represents the document as a tree of slices over shared buffers, so an
+  edit splices a few nodes without copying — making `apply` `O(log s + edit)` in
+  time and removing the copy entirely.
+- **Windowed (virtualized) rendering.** The browser builds DOM for the whole
+  document; for 10 MB that is millions of nodes. Rendering only the visible viewport
+  (as CodeMirror/Monaco do) keeps the DOM bounded regardless of length, paired with
+  `O(1)` caret math — mapping offsets within the rendered window instead of walking
+  every text node.
+- **Delta responses.** A write returns the whole document today. With edits batched
+  this is already minor, but returning only the changed segments (a splice the client
+  applies) would keep responses bounded for very large documents too.
 
 ---
 
@@ -231,9 +287,11 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
   own insertion, layered edits), overlap/bounds rejection, and accept/reject
   (individual, partial, all, no-op).
 - **Search index** — order-independence, title + text matching, partial
-  (substring) matching, case-insensitivity, snippets, removal, re-index.
-- **API** (`MockMvc`) — every endpoint, including `{error, code}` bodies, 404 /
-  412 / 422 paths.
+  (substring) matching, case-insensitivity, snippets (including original-casing and
+  cache-refresh-on-re-index), removal, re-index.
+- **API** (`MockMvc`) — every endpoint, including the sequential `/edits` stream
+  (ordered application, single version bump, an edit atomic PATCH would reject),
+  `{error, code}` bodies, and 404 / 412 / 422 paths.
 - **Real documents** — `SampleDocumentTest` (engine + index) and
   `SampleWorkflowTest` (full HTTP: create → search → redline → re-index → accept)
   run against prose stored in `src/test/resources/samples` (opening chapters of
@@ -252,8 +310,8 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 | Sample requests | curl examples above |
 | README (setup, usage, perf, rationale) | this file |
 | Error handling (4xx/5xx `{error,code}`) | `ApiExceptionHandler` |
-| Bulk operations | `changes: [...]`, applied atomically |
-| Performance / near-linear | inverted index; engine `O(n)` |
+| Bulk operations | atomic `changes: [...]` (PATCH) + ordered stream (`/edits`) |
+| Performance / near-linear | inverted index; binary-search engine; off-thread indexing |
 | Concurrency (versioning/ETag) | `version` + `If-Match` → 412 |
 | In-memory inverted index + trade-offs | `SearchIndex`, above |
 | API design (read/write split, REST vs. action) | above |
@@ -263,6 +321,6 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 ## Possible next steps
 
 Per-change IDs (accept/reject without sending a span), search pagination
-(`limit`/`offset`) and per-document search, a rope with structural sharing (to
-skip copying the text on each edit), persistence, auth, and Operational Transform
-for real-time multi-user editing.
+(`limit`/`offset`) and per-document search (`GET /documents/{id}/search`), the
+large-document optimizations described above, persistence, auth, LLM-assisted
+redline suggestions, and Operational Transform for real-time multi-user editing.

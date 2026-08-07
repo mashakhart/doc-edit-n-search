@@ -4,7 +4,7 @@ package com.docedit.engine;
 public enum SegmentType {
     /** Original text, unchanged. */
     UNCHANGED,
-    /** Newly added text (shown red, not struck). */
+    /** Newly added text (shown blue, not struck). */
     INSERTED,
     /** Original text marked for removal (shown red, struck through). */
     DELETED

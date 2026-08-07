@@ -29,8 +29,9 @@ import org.springframework.web.bind.annotation.RestController;
  * REST endpoints for documents. Handlers stay thin: they parse the request,
  * call the store, and shape the response. Reads and writes are separated by HTTP
  * method, a document is a REST resource, and editing is a PATCH carrying an
- * atomic batch of changes. The document version is returned as an ETag, and a
- * PATCH may carry If-Match to make the write conditional.
+ * atomic batch of changes. The interactive editor instead posts an ordered stream
+ * of edits to /{id}/edits, applied sequentially. The document version is returned
+ * as an ETag, and a write may carry If-Match to make itself conditional.
  */
 @RestController
 @RequestMapping("/documents")
@@ -69,6 +70,16 @@ public class DocumentController {
             @Valid @RequestBody final ChangeRequest body,
             @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) @Nullable final String ifMatch) {
         return withEtag(HttpStatus.OK, store.edit(id, body.changes(), parseIfMatch(ifMatch)));
+    }
+
+    /** Applies an ordered stream of edits sequentially (the interactive editor's
+     *  batched keystrokes); If-Match makes the write conditional (412 on mismatch). */
+    @PostMapping("/{id}/edits")
+    public ResponseEntity<DocumentResponse> editStream(
+            @PathVariable final String id,
+            @Valid @RequestBody final ChangeRequest body,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) @Nullable final String ifMatch) {
+        return withEtag(HttpStatus.OK, store.editStream(id, body.changes(), parseIfMatch(ifMatch)));
     }
 
     /** Deletes a document, returning 204 (404 if absent). */
