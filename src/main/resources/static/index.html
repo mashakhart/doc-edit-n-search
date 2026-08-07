@@ -47,6 +47,7 @@
   .card h3 { margin: 0 0 6px; font-size: 16px; }
   .card .snippet { color: var(--muted); font-size: 13px; max-height: 42px; overflow: hidden; }
   .card .foot { margin-top: 12px; color: var(--muted); font-size: 12px; }
+  mark.hl { background: #cfe0ff; color: #123c7a; border-radius: 3px; padding: 0 1px; }
   .empty { color: var(--muted); background: var(--card); border: 1px dashed var(--line);
            border-radius: var(--radius); padding: 40px; text-align: center; }
   .toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
@@ -162,6 +163,7 @@ const acceptRange = (id, start, end, v) => api("POST", "/documents/" + id + "/ac
 const rejectRange = (id, start, end, v) => api("POST", "/documents/" + id + "/reject", { start, end }, v);
 const acceptAll   = (id, v) => api("POST", "/documents/" + id + "/accept-all", undefined, v);
 const rejectAll   = (id, v) => api("POST", "/documents/" + id + "/reject-all", undefined, v);
+const searchDocs  = (q) => api("GET", "/documents/search?q=" + encodeURIComponent(q));
 
 // ---- helpers -------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
@@ -191,19 +193,47 @@ function docCard(d) {
 }
 async function loadDocs() { state.docs = await listDocs(); }
 async function renderLibrary() {
-  try { await loadDocs(); } catch (e) { return; }
-  filterLibrary();
+  try { await loadDocs(); } catch (e) { /* ignore */ }
+  runSearch();
 }
-function filterLibrary() {
-  const q = $("search-input").value.trim().toLowerCase();
+let searchTimer = null;
+function onSearchInput() { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 200); }
+async function runSearch() {
+  const q = $("search-input").value.trim();
   const grid = $("doc-grid");
+  if (!q) {                                   // empty query: show the whole library
+    grid.innerHTML = "";
+    if (state.docs.length === 0) { grid.innerHTML = '<div class="empty">No documents yet. Create one to get started.</div>'; return; }
+    state.docs.forEach(d => grid.appendChild(docCard(d)));
+    return;
+  }
+  let results;
+  try { results = (await searchDocs(q)).results; }
+  catch (e) { grid.innerHTML = '<div class="empty">Search failed.</div>'; return; }
+  const tokens = (q.toLowerCase().match(/\w+/g)) || [];
   grid.innerHTML = "";
-  if (state.docs.length === 0) { grid.innerHTML = '<div class="empty">No documents yet. Create one to get started.</div>'; return; }
-  const matches = q ? state.docs.filter(d => (d.title || "").toLowerCase().includes(q)) : state.docs;
-  if (matches.length === 0) { grid.innerHTML = '<div class="empty">No documents match your search.</div>'; return; }
-  matches.forEach(d => grid.appendChild(docCard(d)));
+  if (results.length === 0) { grid.innerHTML = '<div class="empty">No documents match your search.</div>'; return; }
+  results.forEach(r => grid.appendChild(resultCard(r, tokens)));
 }
-$("search-input").addEventListener("input", filterLibrary);
+$("search-input").addEventListener("input", onSearchInput);
+
+function resultCard(r, tokens) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.innerHTML = `<h3>${highlight(r.title || "(untitled)", tokens)}</h3>
+                  <div class="snippet">${highlight(r.snippet || "", tokens) || "<em>empty</em>"}</div>`;
+  el.onclick = () => openDoc(r.docId);
+  return el;
+}
+function highlight(text, tokens) {
+  let html = escapeHtml(text);
+  if (tokens.length) {
+    const re = new RegExp("(" + tokens.map(escapeRegex).join("|") + ")", "gi");
+    html = html.replace(re, '<mark class="hl">$1</mark>');
+  }
+  return html;
+}
+function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 // ---- open / create -------------------------------------------------------
 function applyDoc(doc) {

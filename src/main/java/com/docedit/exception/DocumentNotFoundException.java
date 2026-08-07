@@ -7,4 +7,10 @@ public final class DocumentNotFoundException extends RuntimeException {
     public DocumentNotFoundException(final String id) {
         super("document '" + id + "' not found");
     }
+
+    /** Skips stack-trace capture: an expected client error, not a server bug. */
+    @Override
+    public Throwable fillInStackTrace() {
+        return this;
+    }
 }

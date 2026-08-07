@@ -6,6 +6,7 @@ import com.docedit.exception.DocumentNotFoundException;
 import com.docedit.exception.VersionConflictException;
 import com.docedit.payload.request.Change;
 import com.docedit.payload.request.Range;
+import com.docedit.search.SearchIndex;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,6 +31,11 @@ import org.springframework.stereotype.Repository;
 public class DocumentStore {
 
     private final ConcurrentMap<String, Document> documents = new ConcurrentHashMap<>();
+    private final SearchIndex searchIndex;
+
+    public DocumentStore(final SearchIndex searchIndex) {
+        this.searchIndex = searchIndex;
+    }
 
     /** Creates and stores a new document at version 1; a null text becomes empty. */
     @Nonnull
@@ -38,6 +44,7 @@ public class DocumentStore {
         final Document document =
                 new Document(id, title, ChangeEngine.fromText(text == null ? "" : text), 1L);
         documents.put(id, document);
+        reindex(document);
         return document;
     }
 
@@ -97,6 +104,7 @@ public class DocumentStore {
         if (documents.remove(id) == null) {
             throw new DocumentNotFoundException(id);
         }
+        searchIndex.remove(id);
     }
 
     /**
@@ -107,7 +115,7 @@ public class DocumentStore {
     @Nonnull
     private Document mutate(@Nonnull final String id, @Nullable final Long expectedVersion,
                             @Nonnull final UnaryOperator<List<Segment>> transform) {
-        return documents.compute(id, (key, current) -> {
+        final Document updated = documents.compute(id, (key, current) -> {
             if (current == null) {
                 throw new DocumentNotFoundException(id);
             }
@@ -116,5 +124,12 @@ public class DocumentStore {
             }
             return current.withSegments(transform.apply(current.segments()));
         });
+        reindex(updated);
+        return updated;
+    }
+
+    /** Keeps the search index in sync with a document's current accepted text. */
+    private void reindex(@Nonnull final Document document) {
+        searchIndex.index(document.id(), document.title(), ChangeEngine.acceptedText(document.segments()));
     }
 }

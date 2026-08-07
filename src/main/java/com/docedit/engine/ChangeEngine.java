@@ -48,10 +48,10 @@ public final class ChangeEngine {
     @Nonnull
     public static List<Segment> apply(@Nonnull final List<Segment> segments,
                                       @Nonnull final List<Change> changes) {
-        final List<Cell> cells = flatten(segments);
         if (changes.isEmpty()) {
-            return coalesce(cells);
+            return segments;
         }
+        final List<Cell> cells = flatten(segments);
         final List<Span> spans = new ArrayList<>(changes.size());
         for (int i = 0; i < changes.size(); i++) {
             spans.add(resolve(changes.get(i), i, cells.size()));
@@ -223,7 +223,7 @@ public final class ChangeEngine {
         if (runType != null) {
             segments.add(new Segment(run.toString(), runType));
         }
-        return segments;
+        return List.copyOf(segments);
     }
 
     // One character plus its redline state — the working unit during application.

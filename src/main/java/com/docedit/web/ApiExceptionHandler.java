@@ -4,9 +4,13 @@ import com.docedit.exception.ChangeException;
 import com.docedit.exception.DocumentNotFoundException;
 import com.docedit.exception.VersionConflictException;
 import com.docedit.payload.response.ErrorResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -18,6 +22,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  */
 @RestControllerAdvice
 public class ApiExceptionHandler {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ApiExceptionHandler.class);
 
     /** Unknown document id becomes a 404. */
     @ExceptionHandler(DocumentNotFoundException.class)
@@ -41,6 +47,25 @@ public class ApiExceptionHandler {
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleInvalidPayload(final MethodArgumentNotValidException exception) {
         return build(HttpStatus.UNPROCESSABLE_ENTITY, "invalid payload: " + exception.getMessage());
+    }
+
+    /** Malformed or unparseable JSON body becomes a 400. */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleUnreadableBody(final HttpMessageNotReadableException exception) {
+        return build(HttpStatus.BAD_REQUEST, "malformed request body");
+    }
+
+    /** A missing required query parameter (e.g. search q) becomes a 400. */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<ErrorResponse> handleMissingParam(final MissingServletRequestParameterException exception) {
+        return build(HttpStatus.BAD_REQUEST, exception.getMessage());
+    }
+
+    /** Anything unexpected becomes a 500 with the same { error, code } shape, and is logged. */
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleUnexpected(final Exception exception) {
+        LOG.error("Unhandled exception", exception);
+        return build(HttpStatus.INTERNAL_SERVER_ERROR, "internal server error");
     }
 
     /** Builds the { error, code } response for a status and message. */
