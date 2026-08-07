@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Redline</title>
+<style>
+  :root {
+    --red: #c62828; --ink: #1f2430; --muted: #7a8290; --line: #e7e9ee;
+    --bg: #f6f7f9; --card: #fff; --accent: #1d4ed8; --accent-weak: #e6ecfd; --blue: #1d4ed8;
+    --radius: 12px; --shadow: 0 1px 2px rgba(20,25,40,.06), 0 4px 16px rgba(20,25,40,.05);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         color: var(--ink); background: var(--bg); }
+  header { display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 58px;
+           background: var(--red); border-bottom: 1px solid #a81f1f; position: sticky; top: 0; z-index: 5; }
+  .brand { font-weight: 700; letter-spacing: -.01em; color: #fff; }
+  .brand .dot { color: #ffc9c9; }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: 0; padding: 8px 12px; border-radius: 8px; color: rgba(255,255,255,.82);
+               font: inherit; cursor: pointer; }
+  nav button:hover { background: rgba(255,255,255,.16); color: #fff; }
+  nav button.active { background: #fff; color: var(--red); font-weight: 600; }
+  main { padding: 28px 24px; }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  button.btn { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--card);
+               border-radius: 9px; padding: 9px 14px; color: var(--ink); }
+  button.btn:hover { border-color: #cfd3dc; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.btn.primary:hover { background: #1e40af; }
+  button.btn.ghost { background: none; border-color: transparent; color: var(--muted); }
+  button.btn:disabled { opacity: .5; cursor: default; }
+  input, textarea { font: inherit; width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+                    border-radius: 9px; background: var(--card); color: var(--ink); }
+  input:focus, textarea:focus, #editor:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+  .view[hidden] { display: none; }
+
+  /* cards grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 16px; cursor: pointer; box-shadow: var(--shadow); transition: transform .06s ease; }
+  .card:hover { transform: translateY(-1px); border-color: #d7dbe4; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; }
+  .card .snippet { color: var(--muted); font-size: 13px; max-height: 42px; overflow: hidden; }
+  .card .foot { margin-top: 12px; color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); background: var(--card); border: 1px dashed var(--line);
+           border-radius: var(--radius); padding: 40px; text-align: center; }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+
+  /* editor */
+  .editor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .editor-head h1 { margin: 0; }
+  .editor-head .v { color: var(--muted); font-size: 13px; }
+  .editor-grid { display: grid; grid-template-columns: 1fr 300px; gap: 20px; align-items: start; }
+  #editor { min-height: 340px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius);
+            background: var(--card); white-space: pre-wrap; outline: none; font-size: 16px; box-shadow: var(--shadow); }
+  #editor:empty::before { content: "Type to redline. New text appears red; removed text is struck through."; color: #b3b8c2; }
+  .inserted { color: var(--blue); }
+  .deleted  { color: var(--red); text-decoration: line-through; }
+  .preview { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  .side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+  .side .allrow { display: flex; gap: 8px; margin-bottom: 12px; }
+  .change { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--card); }
+  .change .body { font-size: 14px; margin-bottom: 10px; word-break: break-word; }
+  .change .old { color: var(--red); text-decoration: line-through; }
+  .change .new { color: var(--blue); }
+  .change .actions { display: flex; gap: 6px; }
+  .change .actions .btn { padding: 5px 10px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Red<span class="dot">•</span>line</div>
+  <nav>
+    <button data-nav="library" class="active">Library</button>
+    <button data-nav="new">New document</button>
+  </nav>
+</header>
+
+<main>
+  <!-- LIBRARY -->
+  <section id="view-library" class="view">
+    <div class="wrap">
+      <div class="toolbar">
+        <div><h1>Your documents</h1><p class="sub">Open one to redline it.</p></div>
+        <button class="btn primary" data-nav="new">+ New document</button>
+      </div>
+      <input id="search-input" placeholder="Search documents…" style="margin-bottom:18px" />
+      <div id="doc-grid" class="grid"></div>
+    </div>
+  </section>
+
+  <!-- NEW -->
+  <section id="view-new" class="view" hidden>
+    <div class="wrap" style="max-width:640px">
+      <h1>New document</h1>
+      <p class="sub">Give it a title and paste the text you want to redline.</p>
+      <label>Title</label>
+      <input id="new-title" placeholder="e.g. Master Services Agreement" />
+      <label>Text</label>
+      <textarea id="new-text" rows="12" placeholder="Paste document text here…"></textarea>
+      <div style="margin-top:18px; display:flex; gap:8px;">
+        <button class="btn primary" id="new-create">Save</button>
+        <button class="btn ghost" data-nav="library">Cancel</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- EDITOR -->
+  <section id="view-editor" class="view" hidden>
+    <div class="wrap" style="max-width:1100px">
+      <div class="editor-head">
+        <button class="btn ghost" data-nav="library">← Library</button>
+        <h1 id="editor-title">Document</h1>
+        <span class="v" id="editor-version"></span>
+      </div>
+      <div class="editor-grid">
+        <div>
+          <div id="editor" contenteditable="true" spellcheck="false"></div>
+          <div class="preview" id="accepted-preview"></div>
+        </div>
+        <div class="side">
+          <h2>Pending changes</h2>
+          <div class="allrow">
+            <button class="btn" id="accept-all">Accept all</button>
+            <button class="btn" id="reject-all">Reject all</button>
+          </div>
+          <div id="change-list"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script>
+"use strict";
+
+const state = { docId: null, version: 0, segments: [], docs: [] };
+let saveChain = Promise.resolve();
+
+// ---- API -----------------------------------------------------------------
+async function api(method, path, body, ifMatch) {
+  const headers = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (ifMatch != null) headers["If-Match"] = '"' + ifMatch + '"';
+  const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data && data.error) || (method + " " + path + " failed"));
+  return data;
+}
+const listDocs    = () => api("GET", "/documents");
+const createDoc   = (text, title) => api("POST", "/documents", { text, title });
+const getDoc      = (id) => api("GET", "/documents/" + id);
+const patchDoc    = (id, changes, v) => api("PATCH", "/documents/" + id, { changes }, v);
+const acceptRange = (id, start, end, v) => api("POST", "/documents/" + id + "/accept", { start, end }, v);
+const rejectRange = (id, start, end, v) => api("POST", "/documents/" + id + "/reject", { start, end }, v);
+const acceptAll   = (id, v) => api("POST", "/documents/" + id + "/accept-all", undefined, v);
+const rejectAll   = (id, v) => api("POST", "/documents/" + id + "/reject-all", undefined, v);
+
+// ---- helpers -------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const flatText = () => state.segments.map(s => s.text).join("");
+const acceptedTextLocal = () => state.segments.filter(s => s.type !== "DELETED").map(s => s.text).join("");
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ---- routing -------------------------------------------------------------
+function showView(name) {
+  document.querySelectorAll(".view").forEach(v => v.hidden = true);
+  $("view-" + name).hidden = false;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.nav === name));
+  if (name === "library") renderLibrary();
+}
+document.querySelectorAll("[data-nav]").forEach(b => b.addEventListener("click", () => showView(b.dataset.nav)));
+
+// ---- library + search ----------------------------------------------------
+function docCard(d) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.innerHTML = `<h3>${escapeHtml(d.title || "(untitled)")}</h3>
+                  <div class="snippet">${escapeHtml((d.acceptedText || "").slice(0, 140)) || "<em>empty</em>"}</div>`;
+  el.onclick = () => openDoc(d.id);
+  return el;
+}
+async function loadDocs() { state.docs = await listDocs(); }
+async function renderLibrary() {
+  try { await loadDocs(); } catch (e) { return; }
+  filterLibrary();
+}
+function filterLibrary() {
+  const q = $("search-input").value.trim().toLowerCase();
+  const grid = $("doc-grid");
+  grid.innerHTML = "";
+  if (state.docs.length === 0) { grid.innerHTML = '<div class="empty">No documents yet. Create one to get started.</div>'; return; }
+  const matches = q ? state.docs.filter(d => (d.title || "").toLowerCase().includes(q)) : state.docs;
+  if (matches.length === 0) { grid.innerHTML = '<div class="empty">No documents match your search.</div>'; return; }
+  matches.forEach(d => grid.appendChild(docCard(d)));
+}
+$("search-input").addEventListener("input", filterLibrary);
+
+// ---- open / create -------------------------------------------------------
+function applyDoc(doc) {
+  state.docId = doc.id; state.version = doc.version; state.segments = doc.segments || [];
+  $("editor-title").textContent = doc.title || "(untitled)";
+  $("editor-version").textContent = "v" + doc.version;
+  renderEditor();
+}
+async function openDoc(id) {
+  try { applyDoc(await getDoc(id)); showView("editor"); $("editor").focus(); }
+  catch (e) { alert(e.message); }
+}
+$("new-create").onclick = async () => {
+  try {
+    const title = $("new-title").value.trim();
+    const doc = await createDoc($("new-text").value, title || null);
+    $("new-title").value = ""; $("new-text").value = "";
+    applyDoc(doc); showView("editor"); $("editor").focus();
+  } catch (e) { alert(e.message); }
+};
+
+// ---- editor rendering ----------------------------------------------------
+const editor = $("editor");
+function renderEditor() {
+  editor.innerHTML = state.segments.map(s => {
+    const cls = s.type === "INSERTED" ? "inserted" : s.type === "DELETED" ? "deleted" : "";
+    return `<span class="${cls}">${escapeHtml(s.text)}</span>`;
+  }).join("");
+  $("editor-version").textContent = "v" + state.version;
+  $("accepted-preview").textContent = "If accepted: " + acceptedTextLocal();
+  renderChanges();
+}
+function changeGroups() {
+  const groups = []; let offset = 0, cur = null;
+  for (const seg of state.segments) {
+    if (seg.type !== "UNCHANGED") {
+      if (!cur) cur = { start: offset, end: offset, oldText: "", newText: "" };
+      cur.end = offset + seg.text.length;
+      if (seg.type === "DELETED") cur.oldText += seg.text; else cur.newText += seg.text;
+    } else if (cur) { groups.push(cur); cur = null; }
+    offset += seg.text.length;
+  }
+  if (cur) groups.push(cur);
+  return groups;
+}
+function renderChanges() {
+  const wrap = $("change-list"); const groups = changeGroups(); wrap.innerHTML = "";
+  if (groups.length === 0) { wrap.innerHTML = '<div class="preview">No pending changes.</div>'; return; }
+  groups.forEach((g, i) => {
+    const el = document.createElement("div"); el.className = "change";
+    const oldPart = g.oldText ? `<span class="old">${escapeHtml(g.oldText)}</span> ` : "";
+    const newPart = g.newText ? `<span class="new">${escapeHtml(g.newText)}</span>` : '<span class="preview">(deletion)</span>';
+    el.innerHTML = `<div class="body">${i + 1}. ${oldPart}${newPart}</div>
+      <div class="actions"><button class="btn primary" data-a="accept">Accept</button>
+      <button class="btn" data-a="reject">Reject</button></div>`;
+    el.querySelector('[data-a=accept]').onclick = () => runOp(() => acceptRange(state.docId, g.start, g.end, state.version));
+    el.querySelector('[data-a=reject]').onclick = () => runOp(() => rejectRange(state.docId, g.start, g.end, state.version));
+    wrap.appendChild(el);
+  });
+}
+
+// ---- caret in flattened coordinates --------------------------------------
+function caretOffsets() {
+  const sel = window.getSelection();
+  if (!sel.rangeCount) { const n = flatText().length; return { start: n, end: n }; }
+  const range = sel.getRangeAt(0);
+  const pre = range.cloneRange(); pre.selectNodeContents(editor); pre.setEnd(range.startContainer, range.startOffset);
+  const start = pre.toString().length;
+  return { start, end: start + range.toString().length };
+}
+function setCaret(offset) {
+  const clamped = Math.max(0, Math.min(offset, editor.textContent.length));
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  let remaining = clamped, node;
+  while ((node = walker.nextNode())) {
+    if (remaining <= node.length) {
+      const range = document.createRange(); range.setStart(node, remaining); range.collapse(true);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); return;
+    }
+    remaining -= node.length;
+  }
+  editor.focus();
+}
+
+// ---- live editing: every keystroke -> a range PATCH ----------------------
+editor.addEventListener("beforeinput", (e) => {
+  if (!state.docId) return;
+  const { start, end } = caretOffsets();
+  let range = null, replacement = "", caret = start;
+  switch (e.inputType) {
+    case "insertText": replacement = e.data || ""; range = [start, end]; caret = start + replacement.length; break;
+    case "insertParagraph":
+    case "insertLineBreak": replacement = "\n"; range = [start, end]; caret = start + 1; break;
+    case "insertFromPaste":
+      replacement = (e.dataTransfer && e.dataTransfer.getData("text")) || ""; range = [start, end]; caret = start + replacement.length; break;
+    case "deleteContentBackward":
+      if (start !== end) { range = [start, end]; caret = start; }
+      else if (start > 0) { range = [start - 1, start]; caret = start - 1; } break;
+    case "deleteContentForward":
+      if (start !== end) { range = [start, end]; caret = start; }
+      else if (start < flatText().length) { range = [start, start + 1]; caret = start; } break;
+    default: break;
+  }
+  e.preventDefault();
+  if (!range) return;
+  const change = { range: { start: range[0], end: range[1] }, replacement };
+  saveChain = saveChain.then(async () => {
+    try { applyDoc(await patchDoc(state.docId, [change], state.version)); setCaret(caret); }
+    catch (err) { alert(err.message); if (state.docId) applyDoc(await getDoc(state.docId)); }
+  });
+});
+
+function runOp(fn) {
+  saveChain = saveChain.then(async () => {
+    try { applyDoc(await fn()); }
+    catch (e) { alert(e.message); if (state.docId) applyDoc(await getDoc(state.docId)); }
+  });
+  return saveChain;
+}
+$("accept-all").onclick = () => state.docId && runOp(() => acceptAll(state.docId, state.version));
+$("reject-all").onclick = () => state.docId && runOp(() => rejectAll(state.docId, state.version));
+
+// ---- boot ----------------------------------------------------------------
+showView("library");
+</script>
+</body>
+</html>
