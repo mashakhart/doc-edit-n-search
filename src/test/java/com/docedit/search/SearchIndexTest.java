@@ -54,13 +54,30 @@ class SearchIndexTest {
     }
 
     @Test
-    void partialWordMatchesTheContainingWord() {
+    void prefixMatchesTheWordButInfixDoesNot() {
         final SearchIndex fresh = new SearchIndex();
         fresh.index("fruit", "Fruit", "I ate an apple today.");
         assertEquals(1, fresh.search("appl").size());   // prefix of "apple"
-        assertEquals(1, fresh.search("ppl").size());    // infix of "apple"
-        assertEquals(1, fresh.search("apple").size());  // whole word still matches
+        assertEquals(1, fresh.search("apple").size());  // the whole word is a prefix of itself
+        assertEquals(0, fresh.search("ppl").size());    // infix is NOT a prefix
         assertEquals(0, fresh.search("xyz").size());    // unrelated fragment does not
+    }
+
+    @Test
+    void prefixSurfacesEveryWordWithThatPrefixAndNoOthers() {
+        final SearchIndex fresh = new SearchIndex();
+        fresh.index("a", "A", "contract");
+        fresh.index("b", "B", "contractor signed");
+        fresh.index("c", "C", "contraption");
+        // "contract" is a prefix of "contract" and "contractor", but not "contraption".
+        assertEquals(List.of("a", "b"), ids(fresh, "contract"));
+        // "contr" is a prefix of all three; the range scan must stop before unrelated tokens.
+        assertEquals(List.of("a", "b", "c"), ids(fresh, "contr"));
+        assertTrue(fresh.search("contz").isEmpty());
+    }
+
+    private static List<String> ids(final SearchIndex index, final String query) {
+        return index.search(query).stream().map(SearchResult::docId).toList();
     }
 
     @Test

@@ -8,8 +8,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * Read-only search endpoint, kept separate from the document CRUD controller.
- * A query matches documents whose title or text contains a query word; partial
- * words count (e.g. "appl" matches "apple"), and order does not matter.
+ * A query matches documents whose title or text has a word starting with a query
+ * word (prefix match, e.g. "appl" matches "apple"); order does not matter.
  */
 @RestController
 public class SearchController {
@@ -20,7 +20,7 @@ public class SearchController {
         this.index = index;
     }
 
-    /** Searches documents by title and text; matches share any query word (order-independent). */
+    /** Searches by title and text; a document matches if a word starts with any query token (order-independent). */
     @GetMapping("/documents/search")
     public SearchResponse search(@RequestParam("q") final String q) {
         return new SearchResponse(q, index.search(q));

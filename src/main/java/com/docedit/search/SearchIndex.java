@@ -9,6 +9,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.annotation.Nonnull;
@@ -17,17 +19,18 @@ import org.springframework.stereotype.Component;
 
 /**
  * In-memory inverted index over document titles and text, kept in sync by the
- * store on every write. Matching is order-independent and partial: a document is
- * a hit if any of its words CONTAINS a query token (so "appl" matches "apple").
- * Results are returned in a stable id order and deliberately NOT ranked by
- * similarity.
+ * store on every write. Matching is order-independent and prefix-based: a document
+ * is a hit if any of its words STARTS WITH a query token (so "appl" matches
+ * "apple", but "ppl" does not). Results are returned in a stable id order and
+ * deliberately NOT ranked by similarity.
  *
- * Trade-off: mapping tokens to document ids means a query scans the token
- * vocabulary (far smaller than the documents themselves) rather than every
- * document's text. Substring matching makes it a vocabulary scan instead of a
- * single hash lookup; a suffix-automaton or n-gram index would restore near-O(1)
- * lookup at the cost of more memory. Re-indexing on every write trades write cost
- * for fast reads — the right trade when reads dominate.
+ * The postings map is a sorted ConcurrentSkipListMap, so a prefix query is an
+ * O(log V + matches) range scan of the token vocabulary — jump to the first token
+ * >= the prefix and stop at the first that no longer starts with it — rather than
+ * scanning every token or every document. Supporting arbitrary substring matching
+ * (not just prefixes) would instead want an n-gram or suffix-automaton index, at
+ * the cost of more memory. Re-indexing on every write trades write cost for fast
+ * reads — the right trade when reads dominate.
  */
 @Component
 public class SearchIndex {
@@ -35,7 +38,8 @@ public class SearchIndex {
     private static final Pattern TOKEN = Pattern.compile("\\w+");
     private static final int CONTEXT_CHARS = 40;
 
-    private final Map<String, Set<String>> postings = new ConcurrentHashMap<>();  // token -> doc ids
+    // Sorted token -> doc ids, so prefix queries are a range scan (see class doc).
+    private final ConcurrentNavigableMap<String, Set<String>> postings = new ConcurrentSkipListMap<>();
     private final Map<String, String> texts = new ConcurrentHashMap<>();          // doc id -> text
     private final Map<String, String> loweredTexts = new ConcurrentHashMap<>();   // doc id -> lowercased text
     private final Map<String, String> titles = new ConcurrentHashMap<>();         // doc id -> title
@@ -77,9 +81,9 @@ public class SearchIndex {
     }
 
     /**
-     * Returns documents whose title or text contains a query token (partial words
-     * count), each with a snippet around a match. Order-independent; an empty query
-     * yields no results.
+     * Returns documents that have a word starting with a query token (prefix match),
+     * across title and text, each with a snippet around a match. Order-independent;
+     * an empty query yields no results.
      */
     @Nonnull
     public List<SearchResult> search(@Nonnull final String query) {
@@ -88,8 +92,13 @@ public class SearchIndex {
             return List.of();
         }
         final Set<String> matched = new TreeSet<>();  // stable id order, not by similarity
-        for (final Map.Entry<String, Set<String>> entry : postings.entrySet()) {
-            if (containsAny(entry.getKey(), queryTokens)) {
+        for (final String prefix : queryTokens) {
+            // Sorted vocabulary: start at the first token >= the prefix and stop as
+            // soon as one no longer starts with it (they form a contiguous block).
+            for (final Map.Entry<String, Set<String>> entry : postings.tailMap(prefix).entrySet()) {
+                if (!entry.getKey().startsWith(prefix)) {
+                    break;
+                }
                 matched.addAll(entry.getValue());
             }
         }
@@ -133,14 +142,5 @@ public class SearchIndex {
             }
         }
         return earliest;
-    }
-
-    private static boolean containsAny(@Nonnull final String token, @Nonnull final Set<String> queryTokens) {
-        for (final String queryToken : queryTokens) {
-            if (token.contains(queryToken)) {
-                return true;
-            }
-        }
-        return false;
     }
 }

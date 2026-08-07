@@ -122,8 +122,11 @@ curl -X DELETE localhost:8080/documents/{id}
 API); `/edits` applies an **ordered stream** sequentially, so later edits build on
 earlier ones — exactly how a run of keystrokes behaves.
 
-The response carries the new version in an `ETag` header (e.g. `ETag: "2"`),
-which you pass back as `If-Match` on the next write.
+Every response carries the document's version as its `ETag` header (e.g.
+`ETag: "2"`). An ETag is just HTTP's opaque "which version is this?" tag — here it
+*is* the version number. Send it back as `If-Match` on your next write and the
+server applies the change only if the version still matches, otherwise **412**
+(see [Concurrency & thread safety](#concurrency--thread-safety)).
 
 ### Accept / reject changes
 
@@ -158,10 +161,12 @@ curl "localhost:8080/documents/search?q=contract%20fox"
 }
 ```
 
-Matching is **order-independent** and **partial**: a document is a hit if any of
-its words contains a query token (so `appl` matches `apple`), across its title
-and text. Results are returned in a stable order and are deliberately **not**
-ranked by similarity. Each hit includes a snippet around a match.
+Matching is **order-independent** and **prefix-based**: a document is a hit if any
+of its words starts with a query token (so `appl` matches `apple`, but `ppl` does
+not), across its title and text. The token vocabulary is kept sorted (a
+`ConcurrentSkipListMap`), so a prefix query is an `O(log V + matches)` range scan
+rather than a full scan. Results are in a stable order, deliberately **not** ranked
+by similarity, each with a snippet around a match.
 
 ---
 
@@ -218,9 +223,10 @@ sequentially. Any thrown exception is mapped to `{error, code}` by
   is a deliberate non-goal here — it's the natural next step for real-time
   multi-user editing.
 - **Inverted index for search.** `token → doc ids`, rebuilt for a document on
-  every write. Partial (substring) matching means a query scans the token
-  *vocabulary* — far smaller than the documents themselves — and unions the
-  matching posting sets, instead of scanning every document's text.
+  every write and kept in a sorted `ConcurrentSkipListMap`. Prefix matching is then
+  an `O(log V + matches)` range scan over the token *vocabulary* (far smaller than
+  the documents), unioning the matching posting sets, instead of scanning every
+  document's text.
 - **API shape.** Reads (`GET`) and writes (`POST`/`PATCH`/`DELETE`) are cleanly
   separated; documents are a REST resource; editing is a `PATCH` of an atomic
   batch. Accept/reject and search are genuinely action/query shaped, so they're
@@ -228,15 +234,43 @@ sequentially. Any thrown exception is mapped to `{error, code}` by
 
 ---
 
+## Concurrency & thread safety
+
+The server handles each HTTP request on its own thread, so the store can be hit
+concurrently. Safety rests on three things:
+
+- **One mutation choke point.** Every write goes through `DocumentStore.mutate`,
+  which uses `ConcurrentHashMap.compute(id, …)`. `compute` runs its function
+  atomically for that key, so the version check, the edit, and the version bump are
+  one indivisible step — two edits to the *same* document can't interleave and lose
+  an update.
+- **Immutable documents.** A `Document` is an immutable record holding an immutable
+  segment list (the engine returns `List.copyOf(...)` / `List.of(...)`). An edit
+  builds a brand-new `Document` and swaps it in wholesale, so a concurrent reader
+  sees either the old document or the new one in full — never a half-updated one.
+- **Optimistic version checks across requests.** The per-key lock only spans a
+  single call; to catch conflicts *between* requests, a write may carry `If-Match`
+  with the version it last saw. A stale version is rejected with 412 rather than
+  clobbering a newer write.
+
+The search index is written only by the single-thread re-index executor (tasks
+submitted under the same per-document lock, so they stay ordered) and read
+concurrently by searches. Its maps are all `ConcurrentHashMap`s, so reads and the
+background writer never corrupt each other; the only visible effect is that a search
+may briefly reflect a not-yet-finished re-index — the eventual-consistency window
+noted above. A stronger guarantee would build a document's postings off to the side
+and swap them in atomically.
+
+---
+
 ## Performance considerations
 
 - **Search scales.** Indexing a document is a single linear tokenizing pass on
-  write, run off the request thread so it never blocks the edit. Because matching
-  is partial (substring), a query scans the token
-  *vocabulary* (far smaller than the corpus text) and unions posting sets, rather
-  than scanning every document; exact-token matching would instead be a direct
-  hash lookup. The `PerformanceTest` searches a **10 MB** document well within its
-  budget.
+  write, run off the request thread so it never blocks the edit. Prefix matching
+  over the sorted vocabulary is an `O(log V + matches)` range scan — the query
+  jumps to the first token ≥ the prefix and stops as soon as one no longer starts
+  with it — instead of scanning every document. The `PerformanceTest` searches a
+  **10 MB** document well within its budget.
 - **Editing works on segments, not characters.** `ChangeEngine.apply` locates an
   edit's range with a **binary search** over the segments' cumulative offsets
   (`O(log s)`) and splits only the segments it touches — it never expands the
@@ -286,9 +320,9 @@ tens of megabytes, and are left as documented design rather than built:
 - **Engine** — redline behavior (insert/delete/replace, edit vs. delete of your
   own insertion, layered edits), overlap/bounds rejection, and accept/reject
   (individual, partial, all, no-op).
-- **Search index** — order-independence, title + text matching, partial
-  (substring) matching, case-insensitivity, snippets (including original-casing and
-  cache-refresh-on-re-index), removal, re-index.
+- **Search index** — order-independence, title + text matching, prefix matching
+  (and that an infix does *not* match), case-insensitivity, snippets (including
+  original-casing and cache-refresh-on-re-index), removal, re-index.
 - **API** (`MockMvc`) — every endpoint, including the sequential `/edits` stream
   (ordered application, single version bump, an edit atomic PATCH would reject),
   `{error, code}` bodies, and 404 / 412 / 422 paths.

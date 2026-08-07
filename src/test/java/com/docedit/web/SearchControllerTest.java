@@ -50,11 +50,14 @@ class SearchControllerTest extends AbstractApiTest {
     }
 
     @Test
-    void partialWordMatches() throws Exception {
+    void prefixWordMatches() throws Exception {
         createDocument("I ate an apple today", "Fruit");
-        mockMvc.perform(get("/documents/search").param("q", "appl"))
+        mockMvc.perform(get("/documents/search").param("q", "appl"))   // prefix of "apple"
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.results.length()").value(1))
                 .andExpect(jsonPath("$.results[0].title").value("Fruit"));
+        mockMvc.perform(get("/documents/search").param("q", "ppl"))    // infix: no longer a match
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.results.length()").value(0));
     }
 }

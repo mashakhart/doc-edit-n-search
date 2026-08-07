@@ -3,6 +3,7 @@ package com.docedit.web;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -12,6 +13,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.docedit.AbstractApiTest;
+import java.util.HashSet;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -32,6 +35,18 @@ class DocumentControllerTest extends AbstractApiTest {
                 .andExpect(jsonPath("$.version").value(1))
                 .andExpect(jsonPath("$.acceptedText").value("the parties agree"))
                 .andExpect(header().string(HttpHeaders.ETAG, "\"1\""));
+    }
+
+    @Test
+    void createdDocumentsGetDistinctIdsAndNoneAreClobbered() throws Exception {
+        final Set<String> ids = new HashSet<>();
+        for (int i = 0; i < 50; i++) {
+            ids.add(createDocument("body " + i, "Doc " + i));
+        }
+        assertEquals(50, ids.size());   // all ids unique; putIfAbsent never overwrote one
+        for (final String id : ids) {   // and every created document is still retrievable
+            mockMvc.perform(get("/documents/" + id)).andExpect(status().isOk());
+        }
     }
 
     @Test

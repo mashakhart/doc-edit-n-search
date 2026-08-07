@@ -225,7 +225,9 @@ $("search-input").addEventListener("input", onSearchInput);
 function highlight(text, tokens) {
   let html = escapeHtml(text);
   if (tokens.length) {
-    const re = new RegExp("(" + tokens.map(escapeRegex).join("|") + ")", "gi");
+    // \b so we highlight where a WORD starts with the token, matching the
+    // server's prefix search (e.g. "appl" highlights the start of "apple").
+    const re = new RegExp("\\b(" + tokens.map(escapeRegex).join("|") + ")", "gi");
     html = html.replace(re, '<mark class="hl">$1</mark>');
   }
   return html;

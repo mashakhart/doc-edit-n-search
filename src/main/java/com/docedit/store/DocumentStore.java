@@ -52,10 +52,15 @@ public class DocumentStore {
     /** Creates and stores a new document at version 1; a null text becomes empty. */
     @Nonnull
     public Document create(@Nullable final String text, @Nullable final String title) {
-        final String id = UUID.randomUUID().toString().replace("-", "");
-        final Document document =
-                new Document(id, title, ChangeEngine.fromText(text == null ? "" : text), 1L);
-        documents.put(id, document);
+        final List<Segment> segments = ChangeEngine.fromText(text == null ? "" : text);
+        String id;
+        Document document;
+        // putIfAbsent returns non-null if the id is already taken; on the (astronomically
+        // rare) UUID collision, regenerate rather than overwrite an existing document.
+        do {
+            id = UUID.randomUUID().toString().replace("-", "");
+            document = new Document(id, title, segments, 1L);
+        } while (documents.putIfAbsent(id, document) != null);
         reindexAsync(document);
         return document;
     }
