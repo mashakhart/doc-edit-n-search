@@ -1,0 +1,64 @@
+:root {
+  --red: #c62828; --ink: #1f2430; --muted: #7a8290; --line: #e7e9ee;
+  --bg: #f6f7f9; --card: #fff; --accent: #1d4ed8; --accent-weak: #e6ecfd; --blue: #1d4ed8;
+  --radius: 12px; --shadow: 0 1px 2px rgba(20,25,40,.06), 0 4px 16px rgba(20,25,40,.05);
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+       color: var(--ink); background: var(--bg); }
+header { display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 58px;
+         background: var(--red); border-bottom: 1px solid #a81f1f; position: sticky; top: 0; z-index: 5; }
+.brand { font-weight: 700; letter-spacing: -.01em; color: #fff; }
+.brand .dot { color: #ffc9c9; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: 0; padding: 8px 12px; border-radius: 8px; color: rgba(255,255,255,.82);
+             font: inherit; cursor: pointer; }
+nav button:hover { background: rgba(255,255,255,.16); color: #fff; }
+nav button.active { background: #fff; color: var(--red); font-weight: 600; }
+main { padding: 28px 24px; }
+.wrap { max-width: 860px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -.01em; }
+.sub { color: var(--muted); margin: 0 0 22px; }
+button.btn { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--card);
+             border-radius: 9px; padding: 9px 14px; color: var(--ink); }
+button.btn:hover { border-color: #cfd3dc; }
+button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.btn.primary:hover { background: #1e40af; }
+button.btn.ghost { background: none; border-color: transparent; color: var(--muted); }
+button.btn:disabled { opacity: .5; cursor: default; }
+input, textarea { font: inherit; width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+                  border-radius: 9px; background: var(--card); color: var(--ink); }
+input:focus, textarea:focus, #editor:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
+label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+
+/* cards grid */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+        padding: 16px; cursor: pointer; box-shadow: var(--shadow); transition: transform .06s ease; }
+.card:hover { transform: translateY(-1px); border-color: #d7dbe4; }
+.card h3 { margin: 0 0 6px; font-size: 16px; }
+.card .snippet { color: var(--muted); font-size: 13px; max-height: 42px; overflow: hidden; }
+mark.hl { background: #cfe0ff; color: #123c7a; border-radius: 3px; padding: 0 1px; }
+.empty { color: var(--muted); background: var(--card); border: 1px dashed var(--line);
+         border-radius: var(--radius); padding: 40px; text-align: center; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+
+/* editor */
+.editor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.editor-head h1 { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.editor-head .v { color: var(--muted); font-size: 13px; }
+.editor-grid { display: grid; grid-template-columns: 1fr 300px; gap: 20px; align-items: start; }
+#editor { min-height: 340px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius);
+          background: var(--card); white-space: pre-wrap; overflow-wrap: anywhere; outline: none; font-size: 16px; box-shadow: var(--shadow); }
+#editor:empty::before { content: "Type to redline. New text appears blue; removed text is struck through."; color: #b3b8c2; }
+.inserted { color: var(--blue); background: var(--accent-weak); border-radius: 3px; }
+.deleted  { color: var(--red); text-decoration: line-through; }
+.preview { color: var(--muted); font-size: 13px; margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+.side .allrow { display: flex; gap: 8px; margin-bottom: 12px; }
+.change { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--card); }
+.change .body { font-size: 14px; margin-bottom: 10px; word-break: break-word; }
+.change .old { color: var(--red); text-decoration: line-through; }
+.change .new { color: var(--blue); }
+.change .actions { display: flex; gap: 6px; }
+.change .actions .btn { padding: 5px 10px; font-size: 13px; }

@@ -5,13 +5,13 @@ changes — new text shows up inserted, removed text is struck through but kept
 visible — and each change can be individually **accepted** or **rejected**.
 Documents are searchable across their title and text content.
 
-Java 21 · Spring Boot 3 · Gradle · JUnit 5, plus a small vanilla-JS front end.
+Java 21 · Spring Boot 3 · Gradle · JUnit 5, plus a React (Vite) front end.
 
 ---
 
 ## Quick start
 
-Requirements: **JDK 21**.
+Requirements: **JDK 21** (Node 18+ only if you want to rebuild the UI).
 
 ```bash
 ./gradlew test        # run the test suite
@@ -21,6 +21,19 @@ Requirements: **JDK 21**.
 Open <http://localhost:8080> for the UI (a redline editor with an accept/reject
 panel and a Library search box). All HTTP endpoints live under `/documents` — see
 the [API](#api) section below.
+
+### Working on the front end
+
+The UI is a **React + Vite** app in [`frontend/`](frontend). Its production build is
+checked into `src/main/resources/static/`, so `bootRun` serves it as-is — no Node
+needed just to run the app. To develop it:
+
+```bash
+cd frontend
+npm install
+npm run dev     # http://localhost:5173, proxies /documents to the backend on :8080
+npm run build   # rebuild into src/main/resources/static/
+```
 
 ---
 
@@ -172,14 +185,17 @@ by similarity, each with a snippet around a match.
 
 ## Architecture
 
-Layered; each layer depends only on the one below it.
+Layered — each layer depends only on the ones below it — and each request fans out
+from a **thin controller** to the collaborators that do the actual work:
 
-```
-HTTP  ─►  web/            DocumentController, SearchController, ApiExceptionHandler
-          store/          DocumentStore  (state, versioning, concurrency)
-          engine/         ChangeEngine   (pure redline logic)   search/  SearchIndex
-          payload/        request + response records            exception/  typed errors
-```
+![Architecture fan-out: an HTTP request goes to DocumentController (create, get, edit, accept/reject) or SearchController (search). DocumentController calls DocumentStore (state, versioning, concurrency), which calls ChangeEngine (pure segment transforms) and re-indexes into SearchIndex (inverted index, prefix scan). SearchController queries SearchIndex directly. Exceptions from any layer flow to ApiExceptionHandler, which returns a uniform { error, code } body.](architecture-fanout.png)
+
+Reading the fan-out: `DocumentController` calls `DocumentStore` for every read and
+write; the store calls `ChangeEngine` for the redline transform and, after each
+write, hands off to `SearchIndex` to re-index (off-thread). `SearchController` skips
+the store entirely and queries `SearchIndex` directly. Any exception thrown anywhere
+below bubbles up to `ApiExceptionHandler`, which is the only place that knows HTTP
+status codes.
 
 A `PATCH` flows: `DocumentController` validates the body → `DocumentStore.edit`
 takes a per-document atomic lock, checks the version, and calls
