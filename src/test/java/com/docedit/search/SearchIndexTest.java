@@ -70,6 +70,28 @@ class SearchIndexTest {
     }
 
     @Test
+    void snippetUsesOriginalCasingButMatchesCaseInsensitively() {
+        // The snippet is located via the cached lowercased text but sliced from the
+        // original, so a lowercase query still finds an uppercase word and the
+        // snippet keeps the document's casing.
+        final SearchIndex fresh = new SearchIndex();
+        fresh.index("d", "Doc", "The CONTRACT was signed today.");
+        assertTrue(fresh.search("contract").get(0).snippet().contains("CONTRACT"));
+    }
+
+    @Test
+    void snippetReflectsNewTextAfterReindex() {
+        // Guards the lowercased-text cache from going stale: re-indexing must
+        // refresh it so the snippet is drawn from the new text, not the old.
+        final SearchIndex fresh = new SearchIndex();
+        fresh.index("d", "Doc", "the original clause about widgets");
+        fresh.index("d", "Doc", "a revised clause about gadgets");
+        final String snippet = fresh.search("clause").get(0).snippet();
+        assertTrue(snippet.contains("gadgets"));
+        assertFalse(snippet.contains("widgets"));
+    }
+
+    @Test
     void noSharedWordReturnsNothing() {
         assertTrue(index.search("zzzznomatch").isEmpty());
     }

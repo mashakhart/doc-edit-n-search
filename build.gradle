@@ -6,7 +6,7 @@ plugins {
 
 group = 'com.docedit'
 version = '0.1.0'
-description = 'Document editing and search service'
+description = 'Contract redlining tool'
 
 java {
     toolchain {

@@ -11,9 +11,11 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executor;
 import java.util.function.UnaryOperator;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Repository;
 
 /**
@@ -27,19 +29,24 @@ import org.springframework.stereotype.Repository;
  * swap this for a database; the method surface is kept narrow so that stays
  * localised.
  *
- * Design trade-off: the store also drives the search index — it calls reindex on
- * every write — which couples storage to search. That keeps the index trivially
- * consistent with no extra wiring; if this grew, the store could instead publish
- * change events and let the index subscribe, decoupling the two.
+ * Design trade-off: the store also drives the search index — it re-indexes on
+ * every write, but off the request thread via a single-thread executor — which
+ * couples storage to search. That keeps the index consistent with no extra wiring
+ * (and keeps the O(n) tokenizing off the write's critical path, so search may lag
+ * a write by a beat); if this grew, the store could instead publish change events
+ * and let the index subscribe, decoupling the two.
  */
 @Repository
 public class DocumentStore {
 
     private final ConcurrentMap<String, Document> documents = new ConcurrentHashMap<>();
     private final SearchIndex searchIndex;
+    private final Executor searchIndexExecutor;
 
-    public DocumentStore(final SearchIndex searchIndex) {
+    public DocumentStore(final SearchIndex searchIndex,
+                         @Qualifier("searchIndexExecutor") final Executor searchIndexExecutor) {
         this.searchIndex = searchIndex;
+        this.searchIndexExecutor = searchIndexExecutor;
     }
 
     /** Creates and stores a new document at version 1; a null text becomes empty. */
@@ -49,7 +56,7 @@ public class DocumentStore {
         final Document document =
                 new Document(id, title, ChangeEngine.fromText(text == null ? "" : text), 1L);
         documents.put(id, document);
-        reindex(document);
+        reindexAsync(document);
         return document;
     }
 
@@ -109,7 +116,7 @@ public class DocumentStore {
         if (documents.remove(id) == null) {
             throw new DocumentNotFoundException(id);
         }
-        searchIndex.remove(id);
+        searchIndexExecutor.execute(() -> searchIndex.remove(id));
     }
 
     /**
@@ -128,15 +135,24 @@ public class DocumentStore {
                 throw new VersionConflictException(expectedVersion, current.version());
             }
             final Document updated = current.withSegments(transform.apply(current.segments()));
-            // Re-index inside compute so the index update stays ordered with the
-            // version bump; doing it afterwards races with concurrent edits.
-            reindex(updated);
+            // Submit the re-index inside compute so tasks enqueue in version order;
+            // the single-thread executor then applies them in that order. Submitting
+            // afterwards could enqueue a newer write's re-index before an older one.
+            reindexAsync(updated);
             return updated;
         });
     }
 
-    /** Keeps the search index in sync with a document's current accepted text. */
-    private void reindex(@Nonnull final Document document) {
-        searchIndex.index(document.id(), document.title(), ChangeEngine.acceptedText(document.segments()));
+    /**
+     * Re-indexes a document off the request thread. The task is submitted while the
+     * per-document lock is held (inside compute, or right after create), so tasks
+     * enqueue in version order; the single-thread executor applies them in that
+     * order. The O(n) acceptedText + tokenizing runs on the executor thread, not
+     * the caller's.
+     */
+    private void reindexAsync(@Nonnull final Document document) {
+        searchIndexExecutor.execute(
+                () -> searchIndex.index(document.id(), document.title(),
+                        ChangeEngine.acceptedText(document.segments())));
     }
 }

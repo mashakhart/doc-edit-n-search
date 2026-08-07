@@ -12,16 +12,19 @@ import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
  * Base for end-to-end API tests: wires MockMvc + Jackson and clears the store
  * (and thus the search index) before each test, so tests act only on the
- * documents they create.
+ * documents they create. Imports {@link SynchronousIndexingConfig} so re-indexing
+ * runs inline and search reflects a write as soon as it returns.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
+@Import(SynchronousIndexingConfig.class)
 public abstract class AbstractApiTest {
 
     @Autowired

@@ -37,6 +37,7 @@ public class SearchIndex {
 
     private final Map<String, Set<String>> postings = new ConcurrentHashMap<>();  // token -> doc ids
     private final Map<String, String> texts = new ConcurrentHashMap<>();          // doc id -> text
+    private final Map<String, String> loweredTexts = new ConcurrentHashMap<>();   // doc id -> lowercased text
     private final Map<String, String> titles = new ConcurrentHashMap<>();         // doc id -> title
     private final Map<String, Set<String>> docTokens = new ConcurrentHashMap<>(); // doc id -> its tokens
 
@@ -45,6 +46,9 @@ public class SearchIndex {
         remove(docId);
         final String safeTitle = title == null ? "" : title;
         texts.put(docId, text);
+        // Cache the lowercased text once at index time so snippet lookups don't
+        // re-lowercase the whole document on every search.
+        loweredTexts.put(docId, text.toLowerCase(Locale.ROOT));
         titles.put(docId, safeTitle);
         final Set<String> tokens = tokenize(safeTitle + " " + text);
         for (final String token : tokens) {
@@ -68,6 +72,7 @@ public class SearchIndex {
             }
         }
         texts.remove(docId);
+        loweredTexts.remove(docId);
         titles.remove(docId);
     }
 
@@ -90,7 +95,8 @@ public class SearchIndex {
         }
         final List<SearchResult> results = new ArrayList<>(matched.size());
         for (final String docId : matched) {
-            results.add(new SearchResult(docId, titles.get(docId), snippet(texts.get(docId), queryTokens)));
+            final String snippet = snippet(texts.get(docId), loweredTexts.get(docId), queryTokens);
+            results.add(new SearchResult(docId, titles.get(docId), snippet));
         }
         return results;
     }
@@ -106,8 +112,9 @@ public class SearchIndex {
     }
 
     @Nonnull
-    private static String snippet(@Nonnull final String text, @Nonnull final Set<String> queryTokens) {
-        final int match = firstMatchPosition(text, queryTokens);
+    private static String snippet(@Nonnull final String text, @Nonnull final String loweredText,
+                                  @Nonnull final Set<String> queryTokens) {
+        final int match = firstMatchPosition(loweredText, queryTokens);
         if (match < 0) {  // matched only via the title
             return text.length() > 2 * CONTEXT_CHARS ? text.substring(0, 2 * CONTEXT_CHARS) + "…" : text;
         }
@@ -116,11 +123,11 @@ public class SearchIndex {
         return (start > 0 ? "…" : "") + text.substring(start, end) + (end < text.length() ? "…" : "");
     }
 
-    private static int firstMatchPosition(@Nonnull final String text, @Nonnull final Set<String> queryTokens) {
-        final String lower = text.toLowerCase(Locale.ROOT);
+    /** Earliest position of any query token in the already-lowercased text, or -1. */
+    private static int firstMatchPosition(@Nonnull final String loweredText, @Nonnull final Set<String> queryTokens) {
         int earliest = -1;
         for (final String queryToken : queryTokens) {
-            final int position = lower.indexOf(queryToken);
+            final int position = loweredText.indexOf(queryToken);
             if (position >= 0 && (earliest < 0 || position < earliest)) {
                 earliest = position;
             }

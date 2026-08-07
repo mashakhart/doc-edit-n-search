@@ -11,25 +11,32 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 /**
- * Pure, stateless redline engine. Applies a batch of range-based edits to a
- * document's segments and returns the new redlined segments, with all-or-nothing
- * semantics.
+ * Pure, stateless redline engine over a document's segment list, with
+ * all-or-nothing batch semantics.
  *
  * A "replace" strikes the old span (marks it DELETED, kept visible) and inserts
  * the new text (INSERTED) right after it; a zero-width range is a pure insertion;
  * an empty replacement is a pure deletion. Deleting text that was itself an
- * insertion simply drops it (it was never original, so there is nothing to
- * strike). Ranges are measured against the flattened text — struck characters
- * included — which is exactly what the frontend displays.
+ * insertion drops it (never original, so nothing to strike). Ranges are measured
+ * against the flattened text — struck characters included — which is exactly what
+ * the frontend displays.
  *
- * Every range is resolved against the ORIGINAL coordinates, overlapping edits are
- * rejected, and edits are applied left-to-right while reconstructing a fresh cell
- * list, so offsets never shift mid-apply. The class holds no state and has no
- * Spring or I/O dependencies, so it is unit-testable and thread-safe.
+ * Edits work directly on segments: the range is located with a binary search over
+ * the segments' cumulative offsets, and only the segments the range touches are
+ * split and retyped. So an edit is O(log s + affected) in the number of segments
+ * rather than O(n) in the document length. Every range is resolved against the
+ * ORIGINAL coordinates, overlapping edits are rejected, and the result is rebuilt
+ * left-to-right. The class holds no state and no Spring or I/O dependencies.
  */
 public final class ChangeEngine {
 
     private static final String REPLACE_OPERATION = "replace";
+
+    // How a segment's type changes when a range operation covers it; null = drop it.
+    private static final Retype IDENTITY = type -> type;
+    private static final Retype STRIKE = type -> type == SegmentType.INSERTED ? null : SegmentType.DELETED;
+    private static final Retype ACCEPT = type -> type == SegmentType.DELETED ? null : SegmentType.UNCHANGED;
+    private static final Retype REJECT = type -> type == SegmentType.INSERTED ? null : SegmentType.UNCHANGED;
 
     private ChangeEngine() {
     }
@@ -51,29 +58,26 @@ public final class ChangeEngine {
         if (changes.isEmpty()) {
             return segments;
         }
-        final List<Cell> cells = flatten(segments);
+        final int[] offsets = cumulativeOffsets(segments);
+        final int total = offsets[offsets.length - 1];
         final List<Span> spans = new ArrayList<>(changes.size());
         for (int i = 0; i < changes.size(); i++) {
-            spans.add(resolve(changes.get(i), i, cells.size()));
+            spans.add(resolve(changes.get(i), i, total));
         }
         spans.sort((a, b) -> Integer.compare(a.start(), b.start()));
         rejectOverlaps(spans);
-        final List<Cell> out = new ArrayList<>(cells.size());
-        int pos = 0;
+        final List<Segment> result = new ArrayList<>();
+        int cursor = 0;
         for (final Span span : spans) {
-            out.addAll(cells.subList(pos, span.start()));
-            for (final Cell cell : cells.subList(span.start(), span.end())) {
-                if (cell.type() != SegmentType.INSERTED) {
-                    out.add(new Cell(cell.character(), SegmentType.DELETED));
-                }
+            emit(result, segments, offsets, cursor, span.start(), IDENTITY);
+            emit(result, segments, offsets, span.start(), span.end(), STRIKE);
+            if (!span.replacement().isEmpty()) {
+                result.add(new Segment(span.replacement(), SegmentType.INSERTED));
             }
-            for (int c = 0; c < span.replacement().length(); c++) {
-                out.add(new Cell(span.replacement().charAt(c), SegmentType.INSERTED));
-            }
-            pos = span.end();
+            cursor = span.end();
         }
-        out.addAll(cells.subList(pos, cells.size()));
-        return coalesce(out);
+        emit(result, segments, offsets, cursor, total, IDENTITY);
+        return coalesce(result);
     }
 
     /** The document text if all changes were accepted: everything except deletions. */
@@ -83,23 +87,23 @@ public final class ChangeEngine {
     }
 
     /**
-     * Accepts the changes within the given range: insertions become permanent
-     * (UNCHANGED) and struck text is removed. Text outside the range is untouched.
+     * Accepts the changes within the range: insertions become permanent (UNCHANGED)
+     * and struck text is removed. Text outside the range is untouched.
      */
     @Nonnull
     public static List<Segment> acceptRange(@Nonnull final List<Segment> segments,
                                             final int start, final int end) {
-        return rangeOp(segments, start, end, SegmentType.UNCHANGED, null);
+        return rangeOp(segments, start, end, ACCEPT);
     }
 
     /**
-     * Rejects the changes within the given range: insertions are removed and
-     * struck text is restored (UNCHANGED). Text outside the range is untouched.
+     * Rejects the changes within the range: insertions are removed and struck text
+     * is restored (UNCHANGED). Text outside the range is untouched.
      */
     @Nonnull
     public static List<Segment> rejectRange(@Nonnull final List<Segment> segments,
                                             final int start, final int end) {
-        return rangeOp(segments, start, end, null, SegmentType.UNCHANGED);
+        return rangeOp(segments, start, end, REJECT);
     }
 
     /** Accepts every change in the document (accept over the whole span). */
@@ -114,54 +118,68 @@ public final class ChangeEngine {
         return rejectRange(segments, 0, totalLength(segments));
     }
 
-    private static int totalLength(@Nonnull final List<Segment> segments) {
-        int length = 0;
-        for (final Segment segment : segments) {
-            length += segment.text().length();
+    /** Retypes the segments within a range, leaving everything outside it untouched. */
+    @Nonnull
+    private static List<Segment> rangeOp(@Nonnull final List<Segment> segments, final int start, final int end,
+                                         @Nonnull final Retype transform) {
+        final int[] offsets = cumulativeOffsets(segments);
+        final int total = offsets[offsets.length - 1];
+        if (start < 0 || end < start || end > total) {
+            throw new RangeOutOfBoundsException(start, end, total);
         }
-        return length;
+        final List<Segment> result = new ArrayList<>();
+        emit(result, segments, offsets, 0, start, IDENTITY);
+        emit(result, segments, offsets, start, end, transform);
+        emit(result, segments, offsets, end, total, IDENTITY);
+        return coalesce(result);
     }
 
     /**
-     * Retypes insertions/deletions within a range and drops any whose target type
-     * is null; UNCHANGED text and everything outside the range is left as-is.
+     * Appends the pieces of the original segments covering flattened [from, to),
+     * retyped by transform (a null result drops the piece). The first segment is
+     * found by binary search; only the touched segments are split.
      */
-    @Nonnull
-    private static List<Segment> rangeOp(@Nonnull final List<Segment> segments, final int start, final int end,
-                                         @Nullable final SegmentType insertedResult,
-                                         @Nullable final SegmentType deletedResult) {
-        final List<Cell> cells = flatten(segments);
-        if (start < 0 || end < start || end > cells.size()) {
-            throw new RangeOutOfBoundsException(start, end, cells.size());
+    private static void emit(@Nonnull final List<Segment> result, @Nonnull final List<Segment> segments,
+                             @Nonnull final int[] offsets, final int from, final int to,
+                             @Nonnull final Retype transform) {
+        if (from >= to) {
+            return;
         }
-        final List<Cell> out = new ArrayList<>(cells.size());
-        for (int i = 0; i < cells.size(); i++) {
-            final Cell cell = cells.get(i);
-            if (i < start || i >= end || cell.type() == SegmentType.UNCHANGED) {
-                out.add(cell);
-                continue;
+        int position = from;
+        int index = segmentIndexAt(offsets, from);
+        while (position < to && index < segments.size()) {
+            final int segmentStart = offsets[index];
+            final int segmentEnd = offsets[index + 1];
+            final int pieceStart = Math.max(position, segmentStart);
+            final int pieceEnd = Math.min(to, segmentEnd);
+            if (pieceEnd > pieceStart) {
+                final SegmentType newType = transform.apply(segments.get(index).type());
+                if (newType != null) {
+                    final String text =
+                            segments.get(index).text().substring(pieceStart - segmentStart, pieceEnd - segmentStart);
+                    result.add(new Segment(text, newType));
+                }
             }
-            final SegmentType result = cell.type() == SegmentType.INSERTED ? insertedResult : deletedResult;
-            if (result != null) {
-                out.add(new Cell(cell.character(), result));
-            }
+            position = pieceEnd;
+            index++;
         }
-        return coalesce(out);
     }
 
-    @Nonnull
-    private static String concatExcluding(@Nonnull final List<Segment> segments,
-                                          @Nonnull final SegmentType excluded) {
-        final StringBuilder builder = new StringBuilder();
-        for (final Segment segment : segments) {
-            if (segment.type() != excluded) {
-                builder.append(segment.text());
+    /** Binary search: the index of the segment containing the given flattened offset. */
+    private static int segmentIndexAt(@Nonnull final int[] offsets, final int offset) {
+        int low = 0;
+        int high = offsets.length - 1;
+        while (low < high) {
+            final int mid = (low + high + 1) >>> 1;
+            if (offsets[mid] <= offset) {
+                low = mid;
+            } else {
+                high = mid - 1;
             }
         }
-        return builder.toString();
+        return low;
     }
 
-    /** Validates one change and resolves its range against the flattened length. */
     @Nonnull
     private static Span resolve(@Nonnull final Change change, final int index, final int length) {
         final String operation = change.operation() == null ? REPLACE_OPERATION : change.operation();
@@ -182,7 +200,6 @@ public final class ChangeEngine {
         return new Span(start, end, replacement);
     }
 
-    /** Rejects the batch if any two spans (sorted by start) overlap. */
     private static void rejectOverlaps(@Nonnull final List<Span> ascendingByStart) {
         for (int i = 1; i < ascendingByStart.size(); i++) {
             final Span previous = ascendingByStart.get(i - 1);
@@ -194,43 +211,59 @@ public final class ChangeEngine {
         }
     }
 
-    /** Expands segments into one cell per character, carrying each character's state. */
+    /** Prefix sums of segment lengths; offsets[i] is the flattened start of segment i. */
     @Nonnull
-    private static List<Cell> flatten(@Nonnull final List<Segment> segments) {
-        final List<Cell> cells = new ArrayList<>();
+    private static int[] cumulativeOffsets(@Nonnull final List<Segment> segments) {
+        final int[] offsets = new int[segments.size() + 1];
+        for (int i = 0; i < segments.size(); i++) {
+            offsets[i + 1] = offsets[i] + segments.get(i).text().length();
+        }
+        return offsets;
+    }
+
+    private static int totalLength(@Nonnull final List<Segment> segments) {
+        int length = 0;
         for (final Segment segment : segments) {
-            for (int i = 0; i < segment.text().length(); i++) {
-                cells.add(new Cell(segment.text().charAt(i), segment.type()));
-            }
+            length += segment.text().length();
         }
-        return cells;
+        return length;
     }
 
-    /** Merges consecutive same-state cells back into segments. */
+    /** Merges consecutive same-type segments into one; returns an immutable list. */
     @Nonnull
-    private static List<Segment> coalesce(@Nonnull final List<Cell> cells) {
-        final List<Segment> segments = new ArrayList<>();
-        final StringBuilder run = new StringBuilder();
-        SegmentType runType = null;
-        for (final Cell cell : cells) {
-            if (runType != null && cell.type() != runType) {
-                segments.add(new Segment(run.toString(), runType));
-                run.setLength(0);
+    private static List<Segment> coalesce(@Nonnull final List<Segment> segments) {
+        final List<Segment> out = new ArrayList<>();
+        for (final Segment segment : segments) {
+            if (!out.isEmpty() && out.get(out.size() - 1).type() == segment.type()) {
+                final Segment previous = out.remove(out.size() - 1);
+                out.add(new Segment(previous.text() + segment.text(), segment.type()));
+            } else {
+                out.add(segment);
             }
-            run.append(cell.character());
-            runType = cell.type();
         }
-        if (runType != null) {
-            segments.add(new Segment(run.toString(), runType));
-        }
-        return List.copyOf(segments);
+        return List.copyOf(out);
     }
 
-    // One character plus its redline state — the working unit during application.
-    private record Cell(char character, SegmentType type) {
+    @Nonnull
+    private static String concatExcluding(@Nonnull final List<Segment> segments,
+                                          @Nonnull final SegmentType excluded) {
+        final StringBuilder builder = new StringBuilder();
+        for (final Segment segment : segments) {
+            if (segment.type() != excluded) {
+                builder.append(segment.text());
+            }
+        }
+        return builder.toString();
     }
 
-    // A resolved edit in flattened coordinates.
+    /** Maps a covered segment's type to its new type, or null to drop it. */
+    @FunctionalInterface
+    private interface Retype {
+        @Nullable
+        SegmentType apply(@Nonnull SegmentType type);
+    }
+
+    /** A resolved edit in flattened coordinates. */
     private record Span(int start, int end, String replacement) {
     }
 }

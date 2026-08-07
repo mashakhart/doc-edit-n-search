@@ -1,4 +1,4 @@
-# doc-edit-n-search
+# Contract Redlining Tool
 
 A document **redlining** and **search** service. Documents are edited as tracked
 changes — new text shows up inserted, removed text is struck through but kept
@@ -205,15 +205,16 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
   than scanning every document; exact-token matching would instead be a direct
   hash lookup. The `PerformanceTest` searches a **10 MB** document well within its
   budget.
-- **Editing is near-linear in time.** `ChangeEngine.apply` resolves ranges
-  against the original, rejects overlaps, and rebuilds the text in one pass — all
-  `O(n)`.
-- **Editing's memory trade-off.** The redline engine flattens to one cell per
-  character while applying, which is `O(n)` memory. That's fine for typical
-  documents (the benchmark edits a **1 MB** doc comfortably), but for true 10 MB+
-  editing the next step would be a piece-table / rope representation that tracks
-  spans instead of characters. This is a conscious simplicity-vs-scale trade for
-  this iteration.
+- **Editing works on segments, not characters.** `ChangeEngine.apply` locates an
+  edit's range with a **binary search** over the segments' cumulative offsets
+  (`O(log s)`) and splits only the segments it touches — it never expands the
+  document to one object per character. Ranges resolve against the original text
+  and overlaps are rejected before anything is applied.
+- **Memory.** The engine allocates on the order of the number of *segments*, not
+  the number of characters, so a redlined document stays cheap to edit (the
+  benchmark edits a **1 MB** doc comfortably). Producing the new immutable segment
+  list still copies the text once (`O(n)` characters); a rope with structural
+  sharing would avoid even that copy for very large, frequently-edited documents.
 - **Trade-off, stated plainly.** The index costs roughly the corpus size again in
   memory and a re-index on each write, to make reads fast. That's the right trade
   when reads dominate writes — as they do for a search service.
@@ -262,6 +263,6 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 ## Possible next steps
 
 Per-change IDs (accept/reject without sending a span), search pagination
-(`limit`/`offset`) and per-document search, a piece-table engine for very large
-documents, persistence, auth, and Operational Transform for real-time multi-user
-editing.
+(`limit`/`offset`) and per-document search, a rope with structural sharing (to
+skip copying the text on each edit), persistence, auth, and Operational Transform
+for real-time multi-user editing.

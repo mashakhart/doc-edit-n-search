@@ -9,6 +9,7 @@ import com.docedit.exception.RangeOutOfBoundsException;
 import com.docedit.payload.request.Change;
 import com.docedit.payload.request.Range;
 import java.util.List;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 class ChangeEngineTest {
@@ -200,5 +201,19 @@ class ChangeEngineTest {
     void rejectingAPureDeletionRestoresIt() {
         final List<Segment> deleted = apply("hello world", rangeChange(5, 11, ""));
         assertEquals("[U]hello world", render(ChangeEngine.rejectRange(deleted, 5, 11)));
+    }
+
+    @Test
+    void editSpanningAMultiSegmentDocumentTouchesOnlyTheTargetedRegion() {
+        // Two redlines split the document into several segments; a later edit is
+        // then located by binary search and splits only the segment it lands in.
+        final List<Segment> redlined = apply("aaaa bbbb cccc dddd",
+                rangeChange(0, 4, "1"), rangeChange(10, 14, "3"));
+        assertEquals("1 bbbb 3 dddd", ChangeEngine.acceptedText(redlined));
+
+        final String flattened = redlined.stream().map(Segment::text).collect(Collectors.joining());
+        final int at = flattened.indexOf("dddd");
+        final List<Segment> edited = ChangeEngine.apply(redlined, List.of(rangeChange(at, at + 4, "D4")));
+        assertEquals("1 bbbb 3 D4", ChangeEngine.acceptedText(edited));
     }
 }
