@@ -5,6 +5,7 @@ import com.docedit.payload.request.ChangeRequest;
 import com.docedit.payload.request.DocumentCreate;
 import com.docedit.payload.request.Range;
 import com.docedit.payload.response.DocumentResponse;
+import com.docedit.payload.response.DocumentSummary;
 import com.docedit.store.Document;
 import com.docedit.store.DocumentStore;
 import jakarta.validation.Valid;
@@ -35,6 +36,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/documents")
 public class DocumentController {
 
+    private static final int PREVIEW_CHARS = 200;
+
     private final DocumentStore store;
 
     public DocumentController(final DocumentStore store) {
@@ -47,10 +50,10 @@ public class DocumentController {
         return withEtag(HttpStatus.CREATED, store.create(body.text(), body.title()));
     }
 
-    /** Lists all documents. */
+    /** Lists all documents as lightweight summaries (identity + preview, no full segments). */
     @GetMapping
-    public List<DocumentResponse> list() {
-        return store.list().stream().map(DocumentController::toResponse).toList();
+    public List<DocumentSummary> list() {
+        return store.list().stream().map(DocumentController::toSummary).toList();
     }
 
     /** Returns one document (404 if absent) with its current ETag. */
@@ -139,5 +142,14 @@ public class DocumentController {
                 document.segments(),
                 ChangeEngine.acceptedText(document.segments()),
                 document.version());
+    }
+
+    /** Maps a document to a lightweight listing summary (identity + truncated preview). */
+    @Nonnull
+    private static DocumentSummary toSummary(final Document document) {
+        final String accepted = ChangeEngine.acceptedText(document.segments());
+        final String preview =
+                accepted.length() > PREVIEW_CHARS ? accepted.substring(0, PREVIEW_CHARS) : accepted;
+        return new DocumentSummary(document.id(), document.title(), preview);
     }
 }

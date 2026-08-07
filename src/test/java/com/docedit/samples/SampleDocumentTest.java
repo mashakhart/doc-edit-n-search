@@ -11,12 +11,7 @@ import com.docedit.payload.request.Change;
 import com.docedit.payload.request.Range;
 import com.docedit.payload.response.SearchResult;
 import com.docedit.search.SearchIndex;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Objects;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -26,8 +21,8 @@ import org.junit.jupiter.api.Test;
  */
 class SampleDocumentTest {
 
-    private static final String HARRY_POTTER = load("harry_potter.txt");
-    private static final String THE_STRANGER = load("the_stranger.txt");
+    private static final String HARRY_POTTER = Samples.HARRY_POTTER;
+    private static final String THE_STRANGER = Samples.THE_STRANGER;
 
     private SearchIndex index;
 
@@ -113,11 +108,4 @@ class SampleDocumentTest {
         assertEquals(THE_STRANGER, ChangeEngine.acceptedText(restored));
     }
 
-    private static String load(final String name) {
-        try (InputStream in = SampleDocumentTest.class.getResourceAsStream("/samples/" + name)) {
-            return new String(Objects.requireNonNull(in).readAllBytes(), StandardCharsets.UTF_8);
-        } catch (final IOException e) {
-            throw new UncheckedIOException(e);
-        }
-    }
 }

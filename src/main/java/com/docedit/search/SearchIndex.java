@@ -72,8 +72,9 @@ public class SearchIndex {
     }
 
     /**
-     * Returns documents sharing at least one word with the query, each with a
-     * snippet around a match. Order-independent; an empty query yields no results.
+     * Returns documents whose title or text contains a query token (partial words
+     * count), each with a snippet around a match. Order-independent; an empty query
+     * yields no results.
      */
     @Nonnull
     public List<SearchResult> search(@Nonnull final String query) {

@@ -80,7 +80,7 @@ curl -X POST localhost:8080/documents \
   -H 'Content-Type: application/json' \
   -d '{"text":"the quick brown fox","title":"Demo"}'
 
-# List / get one
+# List (lightweight summaries: id, title, preview) / get one (full document)
 curl localhost:8080/documents
 curl localhost:8080/documents/{id}
 
@@ -184,11 +184,12 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 - **Optimistic concurrency.** A monotonic `version` backs `ETag`/`If-Match`;
   conflicting concurrent writes are detected and rejected (412) rather than
   silently clobbering. True concurrent *merging* (Operational Transform / CRDTs)
-  is a deliberate non-goal here — it's the right Part-II direction for real-time
+  is a deliberate non-goal here — it's the natural next step for real-time
   multi-user editing.
 - **Inverted index for search.** `token → doc ids`, rebuilt for a document on
-  every write, so a query is a hash lookup and a set union instead of scanning
-  every document.
+  every write. Partial (substring) matching means a query scans the token
+  *vocabulary* — far smaller than the documents themselves — and unions the
+  matching posting sets, instead of scanning every document's text.
 - **API shape.** Reads (`GET`) and writes (`POST`/`PATCH`/`DELETE`) are cleanly
   separated; documents are a REST resource; editing is a `PATCH` of an atomic
   batch. Accept/reject and search are genuinely action/query shaped, so they're
@@ -198,10 +199,12 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 
 ## Performance considerations
 
-- **Search scales.** The inverted index makes a query a per-token id lookup plus
-  a set union — independent of total corpus size. Indexing a document is a single
-  linear tokenizing pass on write. The `PerformanceTest` searches a **10 MB**
-  document well within its time budget.
+- **Search scales.** Indexing a document is a single linear tokenizing pass on
+  write. Because matching is partial (substring), a query scans the token
+  *vocabulary* (far smaller than the corpus text) and unions posting sets, rather
+  than scanning every document; exact-token matching would instead be a direct
+  hash lookup. The `PerformanceTest` searches a **10 MB** document well within its
+  budget.
 - **Editing is near-linear in time.** `ChangeEngine.apply` resolves ranges
   against the original, rejects overlaps, and rebuilds the text in one pass — all
   `O(n)`.
@@ -210,7 +213,7 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
   documents (the benchmark edits a **1 MB** doc comfortably), but for true 10 MB+
   editing the next step would be a piece-table / rope representation that tracks
   spans instead of characters. This is a conscious simplicity-vs-scale trade for
-  Part I.
+  this iteration.
 - **Trade-off, stated plainly.** The index costs roughly the corpus size again in
   memory and a re-index on each write, to make reads fast. That's the right trade
   when reads dominate writes — as they do for a search service.
@@ -226,13 +229,14 @@ with a fresh `ETag`. Any thrown exception is mapped to `{error, code}` by
 - **Engine** — redline behavior (insert/delete/replace, edit vs. delete of your
   own insertion, layered edits), overlap/bounds rejection, and accept/reject
   (individual, partial, all, no-op).
-- **Search index** — order-independence, title + text matching, OR overlap,
-  case-insensitivity, snippets, removal, re-index.
+- **Search index** — order-independence, title + text matching, partial
+  (substring) matching, case-insensitivity, snippets, removal, re-index.
 - **API** (`MockMvc`) — every endpoint, including `{error, code}` bodies, 404 /
   412 / 422 paths.
-- **Real documents** — `SampleDocumentTest` runs against prose stored in
-  `src/test/resources/samples` (opening chapters of *Harry Potter* and *The
-  Stranger*).
+- **Real documents** — `SampleDocumentTest` (engine + index) and
+  `SampleWorkflowTest` (full HTTP: create → search → redline → re-index → accept)
+  run against prose stored in `src/test/resources/samples` (opening chapters of
+  *Harry Potter* and *The Stranger*).
 - **Performance** — `PerformanceTest` exercises a 10 MB search and a 1 MB edit.
 
 ---

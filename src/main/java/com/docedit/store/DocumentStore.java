@@ -26,6 +26,11 @@ import org.springframework.stereotype.Repository;
  * any step throws, leave the existing document untouched. A real deployment would
  * swap this for a database; the method surface is kept narrow so that stays
  * localised.
+ *
+ * Design trade-off: the store also drives the search index — it calls reindex on
+ * every write — which couples storage to search. That keeps the index trivially
+ * consistent with no extra wiring; if this grew, the store could instead publish
+ * change events and let the index subscribe, decoupling the two.
  */
 @Repository
 public class DocumentStore {
@@ -115,17 +120,19 @@ public class DocumentStore {
     @Nonnull
     private Document mutate(@Nonnull final String id, @Nullable final Long expectedVersion,
                             @Nonnull final UnaryOperator<List<Segment>> transform) {
-        final Document updated = documents.compute(id, (key, current) -> {
+        return documents.compute(id, (key, current) -> {
             if (current == null) {
                 throw new DocumentNotFoundException(id);
             }
             if (expectedVersion != null && expectedVersion != current.version()) {
                 throw new VersionConflictException(expectedVersion, current.version());
             }
-            return current.withSegments(transform.apply(current.segments()));
+            final Document updated = current.withSegments(transform.apply(current.segments()));
+            // Re-index inside compute so the index update stays ordered with the
+            // version bump; doing it afterwards races with concurrent edits.
+            reindex(updated);
+            return updated;
         });
-        reindex(updated);
-        return updated;
     }
 
     /** Keeps the search index in sync with a document's current accepted text. */

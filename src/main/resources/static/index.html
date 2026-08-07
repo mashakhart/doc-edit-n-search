@@ -46,7 +46,6 @@
   .card:hover { transform: translateY(-1px); border-color: #d7dbe4; }
   .card h3 { margin: 0 0 6px; font-size: 16px; }
   .card .snippet { color: var(--muted); font-size: 13px; max-height: 42px; overflow: hidden; }
-  .card .foot { margin-top: 12px; color: var(--muted); font-size: 12px; }
   mark.hl { background: #cfe0ff; color: #123c7a; border-radius: 3px; padding: 0 1px; }
   .empty { color: var(--muted); background: var(--card); border: 1px dashed var(--line);
            border-radius: var(--radius); padding: 40px; text-align: center; }
@@ -183,12 +182,14 @@ function showView(name) {
 document.querySelectorAll("[data-nav]").forEach(b => b.addEventListener("click", () => showView(b.dataset.nav)));
 
 // ---- library + search ----------------------------------------------------
-function docCard(d) {
+// One card for both the library listing and search results; pass query tokens to
+// highlight matches (empty tokens -> plain text).
+function card(id, title, text, tokens) {
   const el = document.createElement("div");
   el.className = "card";
-  el.innerHTML = `<h3>${escapeHtml(d.title || "(untitled)")}</h3>
-                  <div class="snippet">${escapeHtml((d.acceptedText || "").slice(0, 140)) || "<em>empty</em>"}</div>`;
-  el.onclick = () => openDoc(d.id);
+  el.innerHTML = `<h3>${highlight(title || "(untitled)", tokens)}</h3>
+                  <div class="snippet">${highlight(text || "", tokens) || "<em>empty</em>"}</div>`;
+  el.onclick = () => openDoc(id);
   return el;
 }
 async function loadDocs() { state.docs = await listDocs(); }
@@ -204,7 +205,7 @@ async function runSearch() {
   if (!q) {                                   // empty query: show the whole library
     grid.innerHTML = "";
     if (state.docs.length === 0) { grid.innerHTML = '<div class="empty">No documents yet. Create one to get started.</div>'; return; }
-    state.docs.forEach(d => grid.appendChild(docCard(d)));
+    state.docs.forEach(d => grid.appendChild(card(d.id, d.title, d.preview, [])));
     return;
   }
   let results;
@@ -213,18 +214,10 @@ async function runSearch() {
   const tokens = (q.toLowerCase().match(/\w+/g)) || [];
   grid.innerHTML = "";
   if (results.length === 0) { grid.innerHTML = '<div class="empty">No documents match your search.</div>'; return; }
-  results.forEach(r => grid.appendChild(resultCard(r, tokens)));
+  results.forEach(r => grid.appendChild(card(r.docId, r.title, r.snippet, tokens)));
 }
 $("search-input").addEventListener("input", onSearchInput);
 
-function resultCard(r, tokens) {
-  const el = document.createElement("div");
-  el.className = "card";
-  el.innerHTML = `<h3>${highlight(r.title || "(untitled)", tokens)}</h3>
-                  <div class="snippet">${highlight(r.snippet || "", tokens) || "<em>empty</em>"}</div>`;
-  el.onclick = () => openDoc(r.docId);
-  return el;
-}
 function highlight(text, tokens) {
   let html = escapeHtml(text);
   if (tokens.length) {
@@ -266,6 +259,9 @@ function renderEditor() {
   $("accepted-preview").textContent = "If accepted: " + acceptedTextLocal();
   renderChanges();
 }
+// Groups consecutive non-UNCHANGED segments into one accept/reject unit. Note:
+// adjacent redlines merge into a single "change" (an insertion touching a deletion
+// becomes one) because there are no per-change IDs yet — see the README.
 function changeGroups() {
   const groups = []; let offset = 0, cur = null;
   for (const seg of state.segments) {
@@ -296,12 +292,17 @@ function renderChanges() {
 }
 
 // ---- caret in flattened coordinates --------------------------------------
+function flattenedOffsetOf(container, offset) {
+  const r = document.createRange();
+  r.selectNodeContents(editor);
+  r.setEnd(container, offset);
+  return r.toString().length;
+}
 function caretOffsets() {
   const sel = window.getSelection();
   if (!sel.rangeCount) { const n = flatText().length; return { start: n, end: n }; }
   const range = sel.getRangeAt(0);
-  const pre = range.cloneRange(); pre.selectNodeContents(editor); pre.setEnd(range.startContainer, range.startOffset);
-  const start = pre.toString().length;
+  const start = flattenedOffsetOf(range.startContainer, range.startOffset);
   return { start, end: start + range.toString().length };
 }
 function setCaret(offset) {
@@ -321,6 +322,9 @@ function setCaret(offset) {
 // ---- live editing: every keystroke -> a range PATCH ----------------------
 editor.addEventListener("beforeinput", (e) => {
   if (!state.docId) return;
+  // IME composition is handled natively and reconciled on compositionend; don't
+  // intercept it here (preventing default mid-composition breaks IME input).
+  if (e.isComposing || e.inputType === "insertCompositionText") return;
   const { start, end } = caretOffsets();
   let range = null, replacement = "", caret = start;
   switch (e.inputType) {
@@ -329,6 +333,17 @@ editor.addEventListener("beforeinput", (e) => {
     case "insertLineBreak": replacement = "\n"; range = [start, end]; caret = start + 1; break;
     case "insertFromPaste":
       replacement = (e.dataTransfer && e.dataTransfer.getData("text")) || ""; range = [start, end]; caret = start + replacement.length; break;
+    case "insertReplacementText": {   // autocorrect / spellcheck replacing a word
+      const targets = e.getTargetRanges ? e.getTargetRanges() : [];
+      if (targets.length) {
+        const tr = targets[0];
+        const s = flattenedOffsetOf(tr.startContainer, tr.startOffset);
+        const en = flattenedOffsetOf(tr.endContainer, tr.endOffset);
+        replacement = e.data || (e.dataTransfer && e.dataTransfer.getData("text")) || "";
+        range = [s, en]; caret = s + replacement.length;
+      }
+      break;
+    }
     case "deleteContentBackward":
       if (start !== end) { range = [start, end]; caret = start; }
       else if (start > 0) { range = [start - 1, start]; caret = start - 1; } break;
@@ -342,6 +357,22 @@ editor.addEventListener("beforeinput", (e) => {
   const change = { range: { start: range[0], end: range[1] }, replacement };
   saveChain = saveChain.then(async () => {
     try { applyDoc(await patchDoc(state.docId, [change], state.version)); setCaret(caret); }
+    catch (err) { alert(err.message); if (state.docId) applyDoc(await getDoc(state.docId)); }
+  });
+});
+
+// IME: let the browser compose natively, then apply the finished text as one
+// insert at the position composition began, and re-render from the server.
+let compositionStart = null;
+editor.addEventListener("compositionstart", () => { compositionStart = caretOffsets().start; });
+editor.addEventListener("compositionend", (e) => {
+  const at = compositionStart != null ? compositionStart : caretOffsets().start;
+  const data = e.data || "";
+  compositionStart = null;
+  if (!data || !state.docId) return;
+  const change = { range: { start: at, end: at }, replacement: data };
+  saveChain = saveChain.then(async () => {
+    try { applyDoc(await patchDoc(state.docId, [change], state.version)); setCaret(at + data.length); }
     catch (err) { alert(err.message); if (state.docId) applyDoc(await getDoc(state.docId)); }
   });
 });
