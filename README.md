@@ -255,11 +255,13 @@ concurrently. Safety rests on three things:
 
 The search index is written only by the single-thread re-index executor (tasks
 submitted under the same per-document lock, so they stay ordered) and read
-concurrently by searches. Its maps are all `ConcurrentHashMap`s, so reads and the
-background writer never corrupt each other; the only visible effect is that a search
-may briefly reflect a not-yet-finished re-index — the eventual-consistency window
-noted above. A stronger guarantee would build a document's postings off to the side
-and swap them in atomically.
+concurrently by searches. Its maps are all concurrent — a sorted
+`ConcurrentSkipListMap` for the postings (token → ids), `ConcurrentHashMap`s for the
+rest — so reads and the background writer never corrupt each other; the only visible
+effect is that a search may briefly miss a document that is mid-re-index (it's
+skipped rather than erroring) — the eventual-consistency window noted above. A
+stronger guarantee would build a document's postings off to the side and swap them
+in atomically.
 
 ---
 

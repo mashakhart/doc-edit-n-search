@@ -400,7 +400,9 @@ function flush() {
         renderEditor();
         if (focused) setCaret(caret);
       } else {
-        renderEditor();                                // still typing: just refresh the version label
+        // Still typing: refresh ONLY the version label. Calling renderEditor() here
+        // would rebuild the editor DOM and jump the caret mid-keystroke.
+        $("editor-version").textContent = "v" + state.version + (state.pending.length ? " • saving…" : "");
       }
     } catch (err) {
       alert(err.message);

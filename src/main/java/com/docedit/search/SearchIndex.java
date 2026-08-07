@@ -31,6 +31,12 @@ import org.springframework.stereotype.Component;
  * (not just prefixes) would instead want an n-gram or suffix-automaton index, at
  * the cost of more memory. Re-indexing on every write trades write cost for fast
  * reads — the right trade when reads dominate.
+ *
+ * Threading contract: writes (index/remove) must be serialised by a SINGLE thread
+ * — the store submits them to a single-thread executor — while search may run
+ * concurrently on many threads. The maps are concurrent so a search never corrupts
+ * or is corrupted by the writer; it may only briefly miss a document that is
+ * mid-re-index. remove()'s check-then-act relies on that single-writer assumption.
  */
 @Component
 public class SearchIndex {
@@ -104,8 +110,14 @@ public class SearchIndex {
         }
         final List<SearchResult> results = new ArrayList<>(matched.size());
         for (final String docId : matched) {
-            final String snippet = snippet(texts.get(docId), loweredTexts.get(docId), queryTokens);
-            results.add(new SearchResult(docId, titles.get(docId), snippet));
+            final String text = texts.get(docId);
+            final String loweredText = loweredTexts.get(docId);
+            if (text == null || loweredText == null) {
+                // The document was removed or is mid-re-index on the index thread
+                // between the postings scan and here; skip it (eventual consistency).
+                continue;
+            }
+            results.add(new SearchResult(docId, titles.get(docId), snippet(text, loweredText, queryTokens)));
         }
         return results;
     }
