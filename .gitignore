@@ -1,0 +1,12 @@
+# Gradle
+.gradle/
+build/
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local working notes — not part of the deliverable
+.instructions.md

@@ -1,0 +1,220 @@
+package com.docedit.web;
+
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.docedit.payload.request.DocumentCreate;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+/**
+ * End-to-end API tests over the running web stack. A BeforeEach clears the store
+ * so every test starts from a clean slate, using only the public API.
+ */
+@SpringBootTest
+@AutoConfigureMockMvc
+class DocumentControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    /** Deletes every existing document so each test begins with an empty store. */
+    @BeforeEach
+    void clearExistingDocuments() throws Exception {
+        final String listBody = mockMvc.perform(get("/documents"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        for (final JsonNode document : objectMapper.readTree(listBody)) {
+            mockMvc.perform(delete("/documents/" + document.get("id").asText()))
+                    .andExpect(status().isNoContent());
+        }
+    }
+
+    private String createDocument(final String text, final String title) throws Exception {
+        final String body = objectMapper.writeValueAsString(new DocumentCreate(text, title));
+        final String response = mockMvc.perform(post("/documents")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        return objectMapper.readTree(response).get("id").asText();
+    }
+
+    @Test
+    void createReturns201WithVersionAndEtag() throws Exception {
+        mockMvc.perform(post("/documents")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"text":"the parties agree","title":"Doc"}"""))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.version").value(1))
+                .andExpect(jsonPath("$.acceptedText").value("the parties agree"))
+                .andExpect(header().string(HttpHeaders.ETAG, "\"1\""));
+    }
+
+    @Test
+    void createWithoutTextDefaultsToEmpty() throws Exception {
+        mockMvc.perform(post("/documents")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.acceptedText").value(""))
+                .andExpect(jsonPath("$.version").value(1));
+    }
+
+    @Test
+    void getReturnsDocument() throws Exception {
+        final String id = createDocument("hello world", "Doc");
+        mockMvc.perform(get("/documents/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("hello world"))
+                .andExpect(header().string(HttpHeaders.ETAG, "\"1\""));
+    }
+
+    @Test
+    void listIncludesCreatedDocuments() throws Exception {
+        createDocument("first", "List-A");
+        createDocument("second", "List-B");
+        mockMvc.perform(get("/documents"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[*].title", hasItems("List-A", "List-B")));
+    }
+
+    @Test
+    void getMissingReturns404WithErrorBody() throws Exception {
+        mockMvc.perform(get("/documents/does-not-exist"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(404))
+                .andExpect(jsonPath("$.error", containsString("not found")));
+    }
+
+    @Test
+    void patchProducesRedlineAndBumpsVersion() throws Exception {
+        final String id = createDocument("the quick brown fox", "Doc");
+        mockMvc.perform(patch("/documents/" + id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":4,"end":9},"replacement":"slow"}]}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("the slow brown fox"))
+                .andExpect(jsonPath("$.version").value(2))
+                .andExpect(header().string(HttpHeaders.ETAG, "\"2\""))
+                .andExpect(jsonPath("$.segments[?(@.type=='DELETED')].text", hasItem("quick")))
+                .andExpect(jsonPath("$.segments[?(@.type=='INSERTED')].text", hasItem("slow")));
+    }
+
+    @Test
+    void patchAppliesBulkChanges() throws Exception {
+        final String id = createDocument("one two three", "Doc");
+        mockMvc.perform(patch("/documents/" + id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[
+                                  {"range":{"start":0,"end":3},"replacement":"1"},
+                                  {"range":{"start":8,"end":13},"replacement":"3"}
+                                ]}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.acceptedText").value("1 two 3"));
+    }
+
+    @Test
+    void patchWithOutOfBoundsRangeReturns422() throws Exception {
+        final String id = createDocument("abc", "Doc");
+        mockMvc.perform(patch("/documents/" + id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":0,"end":99},"replacement":"q"}]}"""))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value(422));
+    }
+
+    @Test
+    void patchWithMissingRangeReturns422() throws Exception {
+        final String id = createDocument("abc", "Doc");
+        mockMvc.perform(patch("/documents/" + id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"replacement":"q"}]}"""))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value(422));
+    }
+
+    @Test
+    void patchWithEmptyChangesReturns422() throws Exception {
+        final String id = createDocument("abc", "Doc");
+        mockMvc.perform(patch("/documents/" + id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[]}"""))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value(422));
+    }
+
+    @Test
+    void patchOnMissingDocumentReturns404() throws Exception {
+        mockMvc.perform(patch("/documents/does-not-exist")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":0,"end":1},"replacement":"b"}]}"""))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(404));
+    }
+
+    @Test
+    void staleIfMatchIsRejectedWith412() throws Exception {
+        final String id = createDocument("hello world", "Doc");
+        mockMvc.perform(patch("/documents/" + id)
+                        .header(HttpHeaders.IF_MATCH, "\"1\"")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":0,"end":5},"replacement":"hi"}]}"""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value(2));
+
+        mockMvc.perform(patch("/documents/" + id)
+                        .header(HttpHeaders.IF_MATCH, "\"1\"")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"changes":[{"range":{"start":6,"end":11},"replacement":"earth"}]}"""))
+                .andExpect(status().isPreconditionFailed())
+                .andExpect(jsonPath("$.code").value(412));
+    }
+
+    @Test
+    void deleteRemovesDocument() throws Exception {
+        final String id = createDocument("disposable", "Doc");
+        mockMvc.perform(delete("/documents/" + id)).andExpect(status().isNoContent());
+        mockMvc.perform(get("/documents/" + id)).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void deleteMissingDocumentReturns404() throws Exception {
+        mockMvc.perform(delete("/documents/does-not-exist"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(404));
+    }
+}
