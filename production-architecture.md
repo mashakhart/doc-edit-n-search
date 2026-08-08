@@ -9,15 +9,18 @@ mutation choke point, the async re-index.*
 
 ## Architecture & Infra
 
-| Piece | What it does (plain English) | How we'd build it |
-|---|---|---|
-| **Front door** ("edge") | the single entrance all traffic passes through — checks who you are, blocks abuse, routes you onward | CDN + **API gateway** (handles HTTPS, login checks, rate limits, routing) |
-| **App servers** | run the actual application | several identical copies in containers that scale up and down with traffic (Kubernetes/ECS); they hold no data themselves, so we can add more freely |
-| **Document store** | the permanent home for every document and its version history | a **Postgres** database — one row per document; the version number is what stops a newer edit from being silently overwritten |
-| **Big-file storage** | a cheap place for large attachments (PDFs, exports) | cloud file storage (S3), with the database keeping just a link — added only if we actually store big files |
-| **Search** | find documents by their text | a dedicated search engine (**OpenSearch**) from day one — sized for real volume, kept in sync by the queue |
-| **Keeping search fresh** | update search right after each edit, without slowing the edit down | a background queue + workers do it just after the save |
-| **Speed-up cache** | serve popular documents fast without hitting the database every time | **Redis** (a fast in-memory store); because every edit changes the version, out-of-date data is never served |
+| Concern | Prototype (today) | Production | Why / trade-off |
+|---|---|---|---|
+| **Front door** | direct HTTP to one Spring app | CDN + **API gateway** (TLS, auth, rate-limit, routing) | one guarded entrance for the cross-cutting concerns |
+| **App servers** | a single Spring process | stateless containers, autoscaled (K8s/ECS) | app holds no state → add copies freely under load |
+| **Ingestion** | users paste or type plain text | upload **PDF/DOCX → text-extraction + OCR** pipeline → document text | contracts arrive as PDFs; scanned ones need OCR before we can redline or search them |
+| **Document store** | in-memory `ConcurrentHashMap` | **Postgres** — a row per doc, `version` = the optimistic lock | durability; the `If-Match` check maps 1:1 to DB row versioning |
+| **Original files** | none (text only, in memory) | object store (S3) holds the uploaded file; DB keeps a link | keep 10 MB+ binaries out of the DB; the extracted text lives in Postgres + search |
+| **Search** | in-memory inverted index (prefix) | dedicated engine (**OpenSearch**) from day one | sized for real volume; avoids a re-indexing migration later |
+| **Keeping search fresh** | single-thread executor | durable queue (SQS/Kafka) + workers | survives restarts; decouples the write from indexing |
+| **Cache** | none | **Redis** — cache a doc by `id + version` | cut read latency; a new version = a new key, so no stale reads |
+
+> **Ingestion pipeline (PDF → text).** An upload lands in object storage, then a background worker extracts its text: digital PDFs carry a text layer that's read directly (e.g. Apache PDFBox), while **scanned / image-only PDFs need OCR** (Tesseract, or a managed service like AWS Textract) to turn pixels into characters. The extracted text becomes a normal document — redlinable and indexed for search — while the original file is kept for reference. It runs off the request thread, on the same queue as re-indexing.
 
 > **Why a regular (SQL) database, not "NoSQL"?** Every edit safely checks-and-updates a version number so two people can't overwrite each other. SQL databases like Postgres do that reliably and can still hold each document's flexible structure as JSON. NoSQL stores shine at huge scale but make that safe check harder — only worth it much later.
 
@@ -44,20 +47,23 @@ mutation choke point, the async re-index.*
 - **SOC 2** (an outside auditor certifying your security hygiene): access reviews, change management, centralized logging — table stakes before enterprises trust you with their contracts.
 
 ## Scalability & Resilience
-- Stateless API → HPA autoscale on CPU/RPS; Postgres primary + read replicas, multi-AZ with automated failover. **(P0)**
-- Queue-based indexing absorbs write bursts (backpressure) and isolates a slow index from user-facing writes.
-- Correctness already in place: optimistic locking (`version`/`If-Match`) prevents lost updates; add a client request-id to make writes **idempotent** on retry.
-- Multi-region active-passive for DR — added only when the SLA justifies the cost. **(P2)**
+
+- **Autoscaling & failover.** The API servers hold no state, so we add or drop copies automatically with load; Postgres runs as a primary with read replicas across availability zones, promoting a replica automatically if the primary fails. **(P0)**
+- **Backpressure via the queue.** Indexing behind a queue absorbs bursts of writes and keeps a slow index from holding up live edits.
+- **Conflict-safe, idempotent writes.** The version / If-Match check already prevents silent overwrites; a client request id would make a retried write safe to apply exactly once.
+- **Disaster recovery.** A standby second region only earns its cost once our uptime promises demand it. **(P2)**
 
 ## Monitoring & Observability
-- **Metrics (per endpoint):** requests/sec, latency p50/p95/p99, error rate + success rate, CPU utilization and CPU-per-request (efficiency / right-sizing signal), plus queue lag and DB pool + replica lag — Prometheus/Grafana. **(P0)**
-- **Logs:** structured JSON, request-id correlated → Loki/ELK. **Tracing:** OpenTelemetry across API → DB → indexer. **(P1)**
-- **Alerts:** p99 latency past target, error rate above threshold, queue/replica lag, unhealthy pods — paged on **error-budget burn rate** (how fast you're using up the month's allowed error/downtime budget), so a one-off blip stays quiet but a sustained regression pages fast.
+
+- **Metrics.** Per endpoint: requests/sec, latency (p50/p95/p99), error and success rates, and CPU both in total and per request (a right-sizing signal) — plus the queue's backlog and the database's pool and replica lag, in Prometheus/Grafana. **(P0)**
+- **Logs & tracing.** Structured JSON logs tagged with a request id let us follow one request across the system (Loki or ELK); OpenTelemetry traces show its full path from API to database to indexer. **(P1)**
+- **Alerts.** We page on high p99 latency, a persistent error rate, queue or replica lag, or unhealthy servers — firing only on a *sustained* problem, never a one-second blip.
 
 ## Operations & Cost
-- Right-size from real metrics; indexer workers scale to zero when the queue is empty.
-- Single region first; multi-region only when DR/SLA demands it (real cost + complexity). **(P2)**
-- Guardrails: budget alerts, S3 lifecycle tiering, prefer managed services early (buy-vs-build) and revisit at scale.
+
+- **Right-sizing.** We size machines from real metrics and let indexing workers scale to zero when the queue is empty, so we don't pay for idle capacity.
+- **Single region first.** We add a second region only when disaster recovery or uptime promises truly require it. **(P2)**
+- **Cost guardrails.** Budget alerts, automatic tiering of older files to cheaper storage, and leaning on managed services early (buy over build) until scale makes self-hosting worth it.
 
 ---
 
